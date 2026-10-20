@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>On-Call Manager</title>
+  <link rel="stylesheet" href="/public/app.css">
+  <script src="/public/vendor/fullcalendar.min.js" defer></script>
+  <script src="/public/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8z"/>
+      </svg>
+      <span>On-Call</span>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#now" data-tab="now">Now</a>
+      <a href="#calendar" data-tab="calendar">Calendar</a>
+      <a href="#people" data-tab="people">People</a>
+      <a href="#teams" data-tab="teams">Teams</a>
+      <a href="#history" data-tab="history">History</a>
+      <a href="#settings" data-tab="settings">Settings</a>
+    </nav>
+    <label class="master" title="When off, nothing changes in Webex">
+      <span>Automatic switching</span>
+      <input type="checkbox" role="switch" id="global-switch">
+      <span class="switch" aria-hidden="true"></span>
+    </label>
+  </header>
+
+  <main>
+    <!-- Now -->
+    <section id="view-now" class="view" hidden>
+      <div id="lines" class="lines"></div>
+      <div class="checkbar">
+        <span id="last-check">Not checked yet</span>
+        <span id="token-note"></span>
+        <button id="sync-now" class="btn">Check now</button>
+      </div>
+    </section>
+
+    <!-- Calendar -->
+    <section id="view-calendar" class="view" hidden>
+      <div class="cal-head">
+        <div id="team-filters" class="team-filters"></div>
+        <p class="hint">Drag across days or times to add a cover. Click a rotation week to cover it. Drag a cover to move it.</p>
+      </div>
+      <div id="calendar"></div>
+      <h2 class="section-title">Weekly rotations</h2>
+      <p class="hint">Each person covers one week, starting at the handoff. Pick any handoff and who was on that week, and the schedule counts forward and back from there.</p>
+      <div id="rotations" class="rotations"></div>
+    </section>
+
+    <!-- People -->
+    <section id="view-people" class="view" hidden>
+      <form id="person-form" class="add-panel">
+        <h2 class="section-title first">Add a person</h2>
+        <div class="inline-form">
+          <label>Name <input name="name" required maxlength="80" autocomplete="off"></label>
+          <label>Phone <input name="number" required inputmode="tel" placeholder="541 555 1234" autocomplete="off"></label>
+        </div>
+        <fieldset class="team-picks" id="new-person-teams"><legend>Teams</legend></fieldset>
+        <div><button class="btn primary" type="submit">Add person</button></div>
+      </form>
+      <div id="people-cards" class="cards"></div>
+    </section>
+
+    <!-- Teams -->
+    <section id="view-teams" class="view" hidden>
+      <form id="team-form" class="add-panel">
+        <h2 class="section-title first">Add a team</h2>
+        <p class="hint">Use the Contact Center team that forwards to the on-call phone. Saving checks the ID with Webex. New teams start with switching off.</p>
+        <div class="inline-form">
+          <label>Name <input name="displayName" required maxlength="60" placeholder="Network On-Call" autocomplete="off"></label>
+          <label class="wide">Webex team ID <input name="webexTeamId" required spellcheck="false" placeholder="485839ae-ea7c-43ca-a2b0-4af19f4fc615" autocomplete="off"></label>
+          <button class="btn primary" type="submit">Add team</button>
+        </div>
+      </form>
+      <div id="team-cards" class="cards"></div>
+    </section>
+
+    <!-- History -->
+    <section id="view-history" class="view" hidden>
+      <table class="grid" id="history-table">
+        <thead><tr><th>When</th><th>What</th><th>Team</th><th>Details</th><th>By</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <!-- Settings -->
+    <section id="view-settings" class="view" hidden>
+      <div class="settings-panel">
+        <h2 class="section-title first">Checking Webex</h2>
+        <form id="check-form" class="inline-form check-form">
+          <label>Check Webex every
+            <select name="checkMinutes">
+              <option value="5">5 minutes</option>
+              <option value="10">10 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="20">20 minutes</option>
+              <option value="30" selected>30 minutes (on the hour and half hour)</option>
+              <option value="60">60 minutes (on the hour)</option>
+            </select>
+          </label>
+        </form>
+        <p class="hint">Handoffs and covers switch right when they start or end, whatever this is set to.
+          The regular check also catches anyone changing the number by hand in Control Hub.</p>
+
+        <h2 class="section-title">Webex connection</h2>
+        <dl class="kv" id="cred-status"></dl>
+        <p class="hint">The app renews its Webex token on its own every day, which keeps it from expiring.
+          You only need this form if the keys stop working, for example after someone regenerates the client secret.</p>
+
+        <form id="cred-form" autocomplete="off">
+          <label>Refresh token
+            <input type="password" name="refreshToken" autocomplete="new-password" spellcheck="false" placeholder="Paste the new refresh token">
+          </label>
+          <details>
+            <summary>Also change the client ID or client secret</summary>
+            <label>Client ID <input name="clientId" spellcheck="false" placeholder="Leave blank to keep the saved one"></label>
+            <label>Client secret <input type="password" name="clientSecret" autocomplete="new-password" spellcheck="false" placeholder="Leave blank to keep the saved one"></label>
+          </details>
+          <p class="form-error" id="cred-error" hidden></p>
+          <div><button class="btn primary" type="submit">Save and test</button></div>
+        </form>
+
+        <h3 class="sub">Where to find these</h3>
+        <ol class="steps">
+          <li>Open your Service App in the Webex Developer Portal.</li>
+          <li>For a new secret, click <em>Regenerate the client secret</em> and copy it.</li>
+          <li>Under <em>Org Authorizations</em>, paste that secret into <em>Enter Client Secret</em> and click <em>Generate tokens</em>.</li>
+          <li>Copy the refresh token. If you regenerated the secret, paste both here.</li>
+        </ol>
+        <p class="hint">Saved values are encrypted to the Windows account running this app and never shown again.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Cover (override) dialog -->
+  <dialog id="cover-dialog">
+    <form method="dialog" id="cover-form">
+      <h2 id="cover-title">Add cover</h2>
+      <label>Team <select name="teamKey" required></select></label>
+      <label>Who takes the calls <select name="personId" required></select></label>
+      <div class="pair">
+        <label>From <input type="datetime-local" name="start" required step="900"></label>
+        <label>Until <input type="datetime-local" name="end" required step="900"></label>
+      </div>
+      <label>Note <input name="note" maxlength="120" placeholder="Optional, shows on the calendar"></label>
+      <p class="hint" id="cover-swapnote" hidden></p>
+      <button type="button" class="btn" id="to-swap" hidden>Swap this whole week instead</button>
+      <p class="form-error" id="cover-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn danger" id="cover-delete" hidden>Delete cover</button>
+        <button type="button" class="btn danger" id="cover-delete-swap" hidden>Delete whole swap</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" value="cancel" id="cover-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="cover-save">Save cover</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Swap dialog -->
+  <dialog id="swap-dialog">
+    <form method="dialog" id="swap-form">
+      <h2>Swap a week</h2>
+      <p id="swap-week"></p>
+      <label>Swap with <select name="withPersonId" required></select></label>
+      <label id="swap-other-label">In return they give up <select name="otherWeek" required disabled></select></label>
+      <p class="swap-summary" id="swap-summary" hidden></p>
+      <p class="form-error" id="swap-error" hidden></p>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="swap-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="swap-save" disabled>Swap weeks</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
