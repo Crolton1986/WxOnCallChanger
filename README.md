@@ -22,6 +22,15 @@ rotation plus one-off covers. Web UI at http://localhost:8080. PowerShell 7 and 
 Nothing in this app needs admin. The Webex keys are encrypted to the account that saved
 them (step 2), so the task runs as that same account.
 
+## Updating
+
+1. Download `OnCall-x.y.z.zip` from the repo's Releases page.
+2. Stop the task (or Ctrl+C the console), extract the zip over the old folder, then
+   `Get-ChildItem . -Recurse | Unblock-File`.
+3. Start it again. Settings shows the version that's running.
+
+Changes per version are in `CHANGELOG.md`.
+
 ## Folders
 
 | Path | What |

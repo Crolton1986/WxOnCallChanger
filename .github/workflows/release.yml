@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check VERSION matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          ver="$(tr -d '[:space:]' < VERSION)"
+          if [ "v${ver}" != "${tag}" ]; then
+            echo "::error::VERSION is ${ver} but the tag is ${tag}"
+            exit 1
+          fi
+          echo "VER=${ver}" >> "$GITHUB_ENV"
+
+      - name: Build zip
+        run: git archive --format=zip --prefix="OnCall-${VER}/" -o "OnCall-${VER}.zip" "${GITHUB_REF_NAME}"
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${VER}" '
+            index($0, "## [" v "]") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]+\]: / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "::error::No CHANGELOG.md entry for ${VER}"; exit 1; fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "${VER}" in *-*) pre="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" "OnCall-${VER}.zip" \
+            --title "${GITHUB_REF_NAME}" --notes-file notes.md ${pre}
