@@ -757,9 +757,11 @@ async function renderSettings() {
     ['Token good for', c.refreshDaysRemaining != null ? `${Math.floor(c.refreshDaysRemaining)} days, renewed daily` : 'Unknown'],
     ['Client ID', c.clientIdHint ?? 'Unknown'],
     ['Keys belong to', c.account],
+    ['Version', c.version ?? 'Unknown'],
   ] : [
     ['Status', 'No keys saved for this account yet. Paste all three below.'],
     ['Running as', c.runningAs],
+    ['Version', c.version ?? 'Unknown'],
   ];
   $('#check-form').checkMinutes.value = String(c.checkMinutes ?? 30);
   $('#cred-status').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');

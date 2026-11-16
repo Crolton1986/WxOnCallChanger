@@ -115,9 +115,10 @@ function Get-OnCallCredentialStatus {
             lastRefresh = $t.LastRefreshLocal.ToString('o')
             runningAs = "$env:USERDOMAIN\$env:USERNAME"
             checkMinutes = Get-OnCallCheckMinutes
+            version = $env:ONCALL_VERSION
         }
     }
-    catch { @{ saved = $false; runningAs = "$env:USERDOMAIN\$env:USERNAME"; error = $_.Exception.Message; checkMinutes = Get-OnCallCheckMinutes } }
+    catch { @{ saved = $false; runningAs = "$env:USERDOMAIN\$env:USERNAME"; error = $_.Exception.Message; checkMinutes = Get-OnCallCheckMinutes; version = $env:ONCALL_VERSION } }
 }
 
 function Update-OnCallCredential {
