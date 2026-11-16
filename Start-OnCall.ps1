@@ -42,7 +42,7 @@ if ($Service) { $podeOptions.Daemon = $true }
 Start-PodeServer @podeOptions -ScriptBlock {
     Add-PodeEndpoint -Address localhost -Port $env:ONCALL_PORT -Protocol Http
 
-    New-PodeLoggingMethod -File -Name 'server' -Path (Join-Path $env:ONCALL_ROOT 'logs') -MaxDays 30 | Enable-PodeErrorLogging
+    New-PodeLogFileMethod -Name 'server' -Path (Join-Path $env:ONCALL_ROOT 'logs') -MaxDays 30 | Enable-PodeErrorLogging
 
     Import-PodeModule -Path (Join-Path $env:ONCALL_ROOT 'modules\Webex.psm1')
     Import-PodeModule -Path (Join-Path $env:ONCALL_ROOT 'modules\Schedule.psm1')
