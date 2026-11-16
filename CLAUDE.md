@@ -21,12 +21,15 @@ containerized Node app (the container was a poor fit for always-on scheduling).
 Start-OnCall.ps1      Pode server: routes, minute tick. -Service runs as a daemon (no console).
 Install-OnCall.ps1    Registers the scheduled task as the current user. -WhenLoggedOn, -Remove.
 Test-Webex.ps1        -SetupCredential stores Service App keys. Read-only team check by default.
+VERSION               Current version (semver, no leading v). Shown in Settings.
+CHANGELOG.md          One entry per release; the release workflow uses it for notes.
 Test-Schedule.ps1     Prints who is on now, the next 3 weeks, and a read-only sync preview.
 modules\Webex.psm1    Token handling + config-service GET/PUT of a team's dialedNumber.
 modules\Schedule.psm1 Teams, people, rotations, covers, swaps, switches, resolution, sync, audit.
 modules\Web.psm1      Shapes data for the API; Invoke-OnCallApi wraps every route.
 tests\mock_webex.py   Python stand-in for the Webex token + config-service endpoints.
 public\               index.html, app.js, app.css, vendor\fullcalendar.min.js (6.1.22, MIT).
+.github\workflows\    release.yml: on a v* tag, builds OnCall-x.y.z.zip and the GitHub release.
 data\                 (not shipped) config.json, schedule.json, secrets.clixml, audit.jsonl, runtime.json
 ```
 
@@ -62,6 +65,19 @@ data\                 (not shipped) config.json, schedule.json, secrets.clixml, 
   pulled from its rotation, the current week stays put, and later weeks shift.
 - **API guard:** Host header must be localhost; every write under `/api/` needs the
   `X-OnCall: 1` header (blocks cross-site posts). Writes run inside `Lock-PodeObject`.
+
+## Branches and releases
+
+- `main` is always releasable. Never commit to it directly: work on a branch, open a PR into
+  `main`, merge it.
+- Semver: patch for fixes, minor for features, major when `data\` or config needs hand edits.
+- To release: on the branch, bump `VERSION` and move `[Unreleased]` notes into a new
+  `## [x.y.z] - date` section of `CHANGELOG.md` (update the compare links at the bottom).
+  After the PR merges, tag the merge commit on `main` with `git tag -a vx.y.z -m vx.y.z` and
+  push the tag. The workflow fails if `VERSION` doesn't match the tag or the changelog has no
+  entry, then builds the zip with `git archive` (`.gitattributes` keeps tests, `.github` and
+  this file out) and attaches it to the release. A tag with `-` (`v1.0.0-rc.1`) is a prerelease.
+- Plan: v1.0.0 once the first live Monday handoff works.
 
 ## Gotchas already hit (don't relearn these)
 

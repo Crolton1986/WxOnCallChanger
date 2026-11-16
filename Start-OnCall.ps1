@@ -21,6 +21,8 @@ $root = $PSScriptRoot
 $env:ONCALL_DATA = Join-Path $root 'data'
 $env:ONCALL_ROOT = $root
 $env:ONCALL_PORT = $Port
+$verFile = Join-Path $root 'VERSION'
+$env:ONCALL_VERSION = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { 'dev' }
 
 # --- Pode -------------------------------------------------------------------
 $localPode = Get-ChildItem -Path (Join-Path $root 'lib\Pode') -Filter 'Pode.psd1' -Recurse -ErrorAction SilentlyContinue |
@@ -206,5 +208,5 @@ Start-PodeServer @podeOptions -ScriptBlock {
         }
     }
 
-    Write-Host "On-Call Manager running at http://localhost:$env:ONCALL_PORT  (Ctrl+C to stop)" -ForegroundColor Green
+    Write-Host "On-Call Manager $env:ONCALL_VERSION running at http://localhost:$env:ONCALL_PORT  (Ctrl+C to stop)" -ForegroundColor Green
 }
