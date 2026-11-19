@@ -5,6 +5,8 @@ features, major for changes that need `data\` or config edited by hand.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-19
+
 ### Added
 - Runs on Linux as well as Windows, directly or in a container. `Dockerfile` and
   `docker-compose.yml` for a Linux image.
@@ -49,5 +51,6 @@ First tagged build. Done and tested against the mock Webex server; not yet prove
 - A switch on a real team, `Install-OnCall.ps1` on Windows, Pode from PSGallery on Windows,
   the first Monday 8am handoff, real phone numbers and rotation order.
 
-[Unreleased]: https://github.com/Crolton1986/WxOnCallChanger/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Crolton1986/WxOnCallChanger/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Crolton1986/WxOnCallChanger/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Crolton1986/WxOnCallChanger/releases/tag/v0.9.0
