@@ -1,5 +1,4 @@
-'use strict';
-/* Sign-in and one-time setup pages (network mode). */
+/* Sign-in and one-time setup pages (network mode). Loaded as an ES module: deferred and strict by default. */
 const $ = (sel) => document.querySelector(sel);
 
 const loginError = $('#login-error');
@@ -12,13 +11,8 @@ const setupForm = $('#setup-form');
 if (setupForm) {
   const err = $('#setup-error');
   const show = (m) => { err.textContent = m; err.hidden = false; };
-  fetch('/api/setup').then(async (r) => {
-    if (r.status === 404) { location.href = '/login'; return; }
-    const s = await r.json();
-    $('#redirect-uri').textContent = s.redirectUri;
-    if (s.orgId) setupForm.orgId.value = s.orgId;
-    if (s.locked) show('Too many wrong codes. Restart the app to get a new code.');
-  }).catch((ex) => show(`Couldn't load setup: ${ex.message}`));
+
+  // Wire the form before awaiting anything, so a slow first request can't leave Submit dead.
   setupForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     err.hidden = true;
@@ -34,4 +28,18 @@ if (setupForm) {
       location.href = '/login';
     } catch (ex) { show(ex.message); } finally { btn.disabled = false; }
   });
+
+  try {
+    const r = await fetch('/api/setup');
+    if (r.status === 404) {
+      location.href = '/login';
+    } else {
+      const s = await r.json();
+      $('#redirect-uri').textContent = s.redirectUri;
+      if (s.orgId) setupForm.orgId.value = s.orgId;
+      if (s.locked) show('Too many wrong codes. Restart the app to get a new code.');
+    }
+  } catch (ex) {
+    show(`Couldn't load setup: ${ex.message}`);
+  }
 }
