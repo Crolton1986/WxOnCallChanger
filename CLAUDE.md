@@ -1,16 +1,23 @@
 # On-Call Manager
 
-Switches the on-call forwarding number on Webex Contact Center teams from a
-weekly rotation plus one-off covers and week swaps. PowerShell 7 + Pode web UI on
-http://localhost:8080. Replaces the manual `OnCall_Manager.ps1` script and an earlier
-containerized Node app (the container was a poor fit for always-on scheduling).
+Switches the on-call forwarding number on Webex Contact Center teams from a weekly rotation
+plus one-off covers and week swaps. PowerShell 7 + Pode web UI. Runs on Windows or Linux,
+directly or in a container. Replaces a manual PowerShell script and an earlier containerized
+Node app.
+
+This is a public project: never commit org names, org/team IDs, real people or numbers.
+Everything org-specific lives in `data/` (config.json, Settings page).
 
 ## Hard requirements (from the owner)
 
 - PowerShell 7 only (`#Requires -Version 7.4`). Never target 5.1.
 - Never require admin. Installs go to the user profile (`Install-Module -Scope CurrentUser`).
   The scheduled task runs as the user, created without elevation.
-- Local only for now (binds `localhost`). Runs whether or not anyone is signed in.
+- Same code on Windows and Linux, in or out of a container. Nothing branches on "am I in a
+  container"; behavior comes from listen mode and key protection (below). Use `Join-Path`
+  with separate segments, never `\` in paths.
+- Two listen modes: Local (localhost, HTTP, no login, the default) and Network (all
+  interfaces, HTTPS, Webex sign-in). Runs whether or not anyone is signed in.
 - Code updates ship without `data\`, so updating never touches keys or the schedule.
 - Ask before building when a requirement is ambiguous. The owner prefers short answers and
   confirming assumptions first.
@@ -18,26 +25,40 @@ containerized Node app (the container was a poor fit for always-on scheduling).
 ## Layout
 
 ```
-Start-OnCall.ps1      Pode server: routes, minute tick. -Service runs as a daemon (no console).
-Install-OnCall.ps1    Registers the scheduled task as the current user. -WhenLoggedOn, -Remove.
+Start-OnCall.ps1      Pode server: routes, auth, minute tick. -Listen Local|Network, -PublicUrl.
+                      -Service runs as a daemon (Windows scheduled task only).
+Install-OnCall.ps1    Windows: scheduled task as the user (-WhenLoggedOn). Linux: systemd user
+                      service + linger. -Remove undoes either.
+Dockerfile            Linux image, Network mode, needs the oncall_master_key secret.
+docker-compose.yml    Example deployment (named volume, secret file).
+config.example.json   Shape of data/config.json (created with defaults on first start).
 Test-Webex.ps1        -SetupCredential stores Service App keys. Read-only team check by default.
 VERSION               Current version (semver, no leading v). Shown in Settings.
 CHANGELOG.md          One entry per release; the release workflow uses it for notes.
 Test-Schedule.ps1     Prints who is on now, the next 3 weeks, and a read-only sync preview.
-modules\Webex.psm1    Token handling + config-service GET/PUT of a team's dialedNumber.
-modules\Schedule.psm1 Teams, people, rotations, covers, swaps, switches, resolution, sync, audit.
-modules\Web.psm1      Shapes data for the API; Invoke-OnCallApi wraps every route.
-tests\mock_webex.py   Python stand-in for the Webex token + config-service endpoints.
-public\               index.html, app.js, app.css, vendor\fullcalendar.min.js (6.1.22, MIT).
-.github\workflows\    release.yml: on a v* tag, builds OnCall-x.y.z.zip and the GitHub release.
-data\                 (not shipped) config.json, schedule.json, secrets.clixml, audit.jsonl, runtime.json
+modules/Webex.psm1    Config (re-read on change), secret store, token handling, config-service
+                      GET/PUT of a team's dialedNumber.
+modules/Schedule.psm1 Teams, people, rotations, covers, swaps, switches, sign-in list,
+                      resolution, sync, audit. Time zone from config (Get-ScheduleTimeZone).
+modules/Auth.psm1     Network mode: Webex OAuth sign-in, org + allow-list check, in-memory
+                      sessions, one-time setup code.
+modules/Web.psm1      Shapes data for the API; Invoke-OnCallApi wraps every route; settings
+                      view; HTTPS certificate (provided or self-signed).
+tests/mock_webex.py   Python stand-in for Webex: token, config-service, authorize, people/me.
+tests/Smoke.ps1       End-to-end test of both listen modes against the mock (CI runs it).
+public/               index.html, app.js, app.css, login.html, setup.html, auth.js,
+                      vendor/fullcalendar.min.js (6.1.22, MIT).
+.github/workflows/    test.yml: smoke on Windows + Linux, image build. release.yml: on a v* tag,
+                      builds OnCall-x.y.z.zip and the GitHub release.
+data/                 (not shipped) config.json, schedule.json, secrets.*, login.*, tls/,
+                      audit.jsonl, runtime.json
 ```
 
 ## How it works
 
 - **Webex auth:** Webex Service App with `cjp:config_read` and `cjp:config_write`, authorized in
-  Control Hub. Client ID, secret and refresh token are stored in `data\secrets.clixml` via
-  DPAPI, so only the Windows account that saved them can read them. The access token is
+  Control Hub. Client ID, secret and refresh token are stored encrypted (see key protection).
+  The access token is
   refreshed when it's under 1 hour from expiry and at least daily. Each refresh resets the
   refresh token's 90-day life (per Cisco staff on the developer forum; the reset can lag a few
   days). Keys can be replaced from the Settings page, and a failed test restores the old keys.
@@ -49,8 +70,9 @@ data\                 (not shipped) config.json, schedule.json, secrets.clixml, 
 - **Schedule resolution:** sources produce slots (team, person, start, end, priority).
   Rotation = priority 10 (weekly, from an anchor handoff + anchor person; default Monday 8am).
   Covers = priority 20; among overlapping covers the newest wins. A swap is two linked
-  full-week covers sharing a `SwapId`. All times are Pacific wall clock strings
-  (`yyyy-MM-ddTHH:mm`); DST is handled through TimeZoneInfo.
+  full-week covers sharing a `SwapId`. All times are wall clock strings in the
+  configured time zone (`yyyy-MM-ddTHH:mm`, blank = host zone); DST is handled through
+  TimeZoneInfo.
 - **Switching:** Pode schedule ticks every minute (`Invoke-OnCallTick`). It calls Webex only when
   the interval from Settings lines up (default 30 min, at :00 and :30), the last check is
   overdue, or the desired number changed (handoff or cover boundary, computed locally). A
@@ -63,8 +85,29 @@ data\                 (not shipped) config.json, schedule.json, secrets.clixml, 
 - **Removal rules:** a team can't be removed while it has people or covers ending after now.
   Taking someone off a team is blocked if they have future covers on it; otherwise they're
   pulled from its rotation, the current week stays put, and later weeks shift.
-- **API guard:** Host header must be localhost; every write under `/api/` needs the
-  `X-OnCall: 1` header (blocks cross-site posts). Writes run inside `Lock-PodeObject`.
+- **Key protection** (`Get-OnCallKeyProtection`): a master key file (`ONCALL_MASTER_KEY_FILE`
+  or Docker secret `/run/secrets/oncall_master_key`) means AES-256-GCM to `data/<name>.json`;
+  otherwise Windows uses DPAPI (`data/<name>.clixml`) and Linux generates
+  `~/.config/oncall/master.key`. `ONCALL_REQUIRE_MASTER_KEY=1` (set in the image) forbids the
+  fallbacks. Stores: `secrets` (Service App), `login` (sign-in Integration). A store written by
+  the other method gives a clear error; keys can be re-entered on Settings.
+- **Network mode sign-in:** "Sign in with Webex" through an Integration (`spark:people_read`).
+  Allowed = `/v1/people/me` orgId (base64 `ciscospark://.../ORGANIZATION/<uuid>`, decoded) equals
+  config `Webex.OrgId` AND an email is on `schedule.json` `Users`. The user's token is dropped
+  after the check. Sessions are server-side in memory (`oncall_sid` cookie, Secure, HttpOnly,
+  SameSite=Lax because Strict loses the cookie on the redirect back from Webex), 8 h idle;
+  removing someone from the list ends their session on the next request. Pode's own sessions
+  aren't used (no SameSite option). Audit actor = signed-in email.
+- **First-run setup:** in Network mode, until the Integration keys, org ID and one user exist,
+  each start prints an 8-character code. `/setup` takes it plus those values; 5 wrong codes lock
+  it until restart. A wrong master key also reopens setup (as a recovery path) and warns at start.
+- **HTTPS:** `ONCALL_CERT_FILE`/`ONCALL_KEY_FILE` (PEM) or a .pfx, else a self-signed cert in
+  `data/tls/`, remade when the public host changes (marker holds hosts + thumbprint, so a cert
+  dropped in at the same path is never overwritten). Loaded through a PKCS#12 round trip
+  because Windows SslStream can't use a key loaded from PEM.
+- **API guard:** Host header must be localhost, 127.0.0.1 or the public URL's host; every write
+  under `/api/` and `/auth/` needs the `X-OnCall: 1` header (blocks cross-site posts). Writes
+  run inside `Lock-PodeObject`.
 
 ## Branches and releases
 
@@ -91,35 +134,49 @@ data\                 (not shipped) config.json, schedule.json, secrets.clixml, 
 - A boot trigger needs admin, so the task uses a repeating 5-minute trigger with
   `MultipleInstances IgnoreNew` as a watchdog instead.
 - Files extracted from a downloaded zip need `Unblock-File` under RemoteSigned.
+- Script-level variables don't reliably reach the `Start-PodeServer` block either; look things
+  up again inside it (the cert, key protection) or pass them through `$env:`.
+- `Invoke-WebRequest -MaximumRedirection 0` returns the 302 but also raises a non-terminating
+  error; https-to-http redirects need `-AllowInsecureRedirect`.
+- The `mcr.microsoft.com/powershell` image can lack the PSGallery registration, and
+  `Install-Module` then fails without failing the build. The Dockerfile registers it and
+  imports Pode so a bad install stops the build.
+- A container running as a non-root user can't write to a root-owned bind mount; compose uses
+  a named volume.
 
 ## Testing
 
-No Pester suite yet. Testing so far ran PowerShell 7.4 on Linux against `tests\mock_webex.py`
-(stand-in for the token endpoint and config-service), with a source build of Pode 2.14.1, and drove the UI
-with Playwright. The mock already covers 401 retry, invalid_client, invalid_grant, 404 team and
-per-team numbers, so it's a ready base for real tests.
+No Pester suite yet. `tests/Smoke.ps1` (needs `python tests/mock_webex.py` running) starts the
+real server in Local and Network mode and checks keys, teams, sync, guards, setup, sign-in,
+refusals, the sign-in list and sign-out. CI (`test.yml`) runs it on ubuntu-latest and
+windows-latest and builds and starts the image. Locally it ran on Linux with Pode 2.14.1 from
+PSGallery; the UI and the container were driven with Playwright and Docker. The mock covers
+401 retry, invalid_client, invalid_grant, 404 team, per-team numbers, and Webex sign-in
+(`/mock/user` picks who signs in).
 
 ## Status
 
 Done and tested against the mock: Webex module, schedule engine, web UI (Now, Calendar with
 rotation editor, People, Teams, History, Settings), covers, week swaps, team management, check
-interval, credential updates.
+interval, credential updates, Local and Network modes, Webex sign-in, setup, sign-in list,
+AES key store, self-signed and provided certs, the container image (Linux).
 
-Verified on the owner's PC: token setup, reading both real teams, Unblock-File flow.
+Verified on the owner's PC (before the cross-platform work): token setup, reading both real
+teams, Unblock-File flow.
 
 Not yet verified for real:
 1. A live switch on a real team (turn switching on, add a short cover, confirm the phone rings).
 2. `Install-OnCall.ps1` on Windows (never run). Check the "Log on as a batch job" right;
-   `-WhenLoggedOn` is the fallback.
-3. Real Pode from PSGallery on Windows (tests used a source build).
-4. The first live Monday 8am handoff.
-5. Real phone numbers and rotation order (the data still has sample 555 numbers).
+   `-WhenLoggedOn` is the fallback. The Linux systemd path is also unrun (no user systemd in
+   the test sandbox).
+3. Network mode on Windows (CI covers it; not run by hand). Windows Firewall will ask to allow
+   pwsh on first listen.
+4. Real Webex Integration sign-in and redirect URI on a real host name.
+5. The first live Monday 8am handoff.
+6. Real phone numbers and rotation order.
 
 ## v2
 
-- **Network access with AD login:** a Settings toggle to listen beyond localhost, with Pode
-  Windows/AD auth limited to an AD group. Needs a firewall rule and likely a URL reservation,
-  so it's opt-in.
 - **Outlook calendar as a schedule source:** read the team's Outlook on-call calendar through
   Microsoft Graph and return slots in the same shape as rotation and covers. Decide on a title
   convention ("Support On-Call: Name") and whether Outlook replaces or sits alongside the

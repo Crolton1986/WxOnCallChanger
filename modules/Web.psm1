@@ -7,13 +7,13 @@ function Invoke-OnCallApi {
     <#
     Runs a route body, returns its last output as JSON, and turns errors into
     HTTP 400 { error }. -Lock serializes writes with the scheduler.
+    The audit actor (signed-in email, or 'web' in local mode) is set by the auth middleware.
     #>
     param(
         [Parameter(Mandatory, Position = 0)][scriptblock]$ScriptBlock,
         [switch]$Lock
     )
     try {
-        Set-OnCallActor 'web'
         $out = @(if ($Lock) { Lock-PodeObject -Return -ScriptBlock $ScriptBlock } else { & $ScriptBlock })
         $result = if ($out.Count -gt 0) { $out[$out.Count - 1] } else { @{ ok = $true } }
         Write-PodeJsonResponse -Value $result -Depth 10
@@ -26,7 +26,7 @@ function Invoke-OnCallApi {
 function Format-Wall { param([datetime]$Time) $Time.ToString('yyyy-MM-ddTHH:mm:ss', [cultureinfo]::InvariantCulture) }
 
 function ConvertFrom-ClientTime {
-    <# FullCalendar sends ISO strings with an offset, or plain dates. Returns Pacific wall-clock. #>
+    <# FullCalendar sends ISO strings with an offset, or plain dates. Returns wall-clock in the schedule's zone. #>
     param([Parameter(Mandatory)][string]$Value)
     $dto = [DateTimeOffset]::Parse($Value, [cultureinfo]::InvariantCulture)
     ConvertTo-ScheduleLocal $dto.UtcDateTime
@@ -113,12 +113,12 @@ function Get-OnCallCredentialStatus {
             saved = $true; account = $t.Account; clientIdHint = $t.ClientIdHint
             refreshDaysRemaining = $t.RefreshDaysRemaining
             lastRefresh = $t.LastRefreshLocal.ToString('o')
-            runningAs = "$env:USERDOMAIN\$env:USERNAME"
+            runningAs = Get-OnCallAccountName
             checkMinutes = Get-OnCallCheckMinutes
             version = $env:ONCALL_VERSION
         }
     }
-    catch { @{ saved = $false; runningAs = "$env:USERDOMAIN\$env:USERNAME"; error = $_.Exception.Message; checkMinutes = Get-OnCallCheckMinutes; version = $env:ONCALL_VERSION } }
+    catch { @{ saved = $false; runningAs = Get-OnCallAccountName; error = $_.Exception.Message; checkMinutes = Get-OnCallCheckMinutes; version = $env:ONCALL_VERSION } }
 }
 
 function Update-OnCallCredential {
@@ -154,4 +154,120 @@ function Get-OnCallTeamsView {
     }) }
 }
 
-Export-ModuleMember -Function Get-OnCallTeamsView, Get-OnCallCredentialStatus, Update-OnCallCredential, Invoke-OnCallApi, Get-OnCallStatus, Get-OnCallEvents, ConvertFrom-ClientTime
+
+function Get-OnCallSettingsView {
+    <# Everything the Settings page shows apart from the Webex keys. #>
+    param([string]$CurrentUser)
+    $cfg  = Get-OnCallConfig
+    $prot = try { (Get-OnCallKeyProtection).Description } catch { $_.Exception.Message }
+    $network = $env:ONCALL_LISTEN -eq 'Network'
+    $v = @{
+        checkMinutes  = Get-OnCallCheckMinutes
+        orgId         = $cfg.Webex.OrgId
+        configBaseUrl = $cfg.Webex.ConfigBaseUrl
+        timeZone      = $cfg.TimeZone
+        timeZoneInUse = (Get-ScheduleTimeZone).Id
+        hostTimeZone  = [TimeZoneInfo]::Local.Id
+        listen        = if ($network) { 'Network' } else { 'Local' }
+        publicUrl     = $env:ONCALL_PUBLIC_URL
+        protection    = $prot
+        runningAs     = Get-OnCallAccountName
+        platform      = if ($IsWindows) { 'Windows' } elseif ($IsMacOS) { 'macOS' } else { 'Linux' }
+        container     = [bool]($env:ONCALL_REQUIRE_MASTER_KEY -eq '1')
+        version       = $env:ONCALL_VERSION
+        me            = $CurrentUser
+    }
+    if ($network) {
+        $v.login = Get-OnCallLoginStatus -RedirectUri "$($env:ONCALL_PUBLIC_URL)/auth/callback"
+        $v.users = @(Get-OnCallUser | ForEach-Object { @{ email = $_.Email; addedBy = $_.AddedBy; addedUtc = $_.AddedUtc } })
+    }
+    $v
+}
+
+function Set-OnCallSettings {
+    <# Saves whichever settings are in the request body. #>
+    param([hashtable]$Body)
+    if ($Body.ContainsKey('checkMinutes')) { Set-OnCallCheckMinutes -Minutes ([int]$Body.checkMinutes) }
+    $p = @{}
+    foreach ($k in 'orgId', 'configBaseUrl', 'timeZone') { if ($Body.ContainsKey($k)) { $p[$k] = "$($Body[$k])" } }
+    if ($p.Count) {
+        $before = Get-OnCallConfig
+        $old = @{ orgId = $before.Webex.OrgId; configBaseUrl = $before.Webex.ConfigBaseUrl; timeZone = $before.TimeZone }
+        $null = Set-OnCallConfig @p
+        $after = Get-OnCallConfig
+        $new = @{ orgId = $after.Webex.OrgId; configBaseUrl = $after.Webex.ConfigBaseUrl; timeZone = $after.TimeZone }
+        $changed = @($p.Keys | Where-Object { $old[$_] -ne $new[$_] } | ForEach-Object { "$_ '$($old[$_])' to '$($new[$_])'" })
+        if ($changed.Count) { Write-OnCallAudit -Event 'settings_update' -Detail ($changed -join ', ') }
+    }
+}
+
+function Get-OnCallTimeZoneList {
+    <# Zones for the Settings picker, in the platform's own IDs. #>
+    @([TimeZoneInfo]::GetSystemTimeZones() | ForEach-Object { @{ id = $_.Id; name = $_.DisplayName } })
+}
+
+function Get-OnCallCertificate {
+    <#
+    The HTTPS certificate for network mode:
+      1. ONCALL_CERT_FILE + ONCALL_KEY_FILE (PEM), or a .pfx/.p12 in ONCALL_CERT_FILE with
+         ONCALL_CERT_PASSWORD. Defaults: data/tls/cert.pem + data/tls/key.pem.
+      2. None there: make a self-signed one in data/tls/ (and remake it if the host changes).
+    Returned through a PKCS#12 round trip, since Windows TLS can't use a key loaded from PEM.
+    #>
+    param([Parameter(Mandatory)][string]$DataPath, [Parameter(Mandatory)][string]$PublicHost)
+    $tls    = Join-Path $DataPath 'tls'
+    $cert   = if ($env:ONCALL_CERT_FILE) { $env:ONCALL_CERT_FILE } else { Join-Path $tls 'cert.pem' }
+    $key    = if ($env:ONCALL_KEY_FILE)  { $env:ONCALL_KEY_FILE }  else { Join-Path $tls 'key.pem' }
+    $marker = Join-Path $tls 'self-signed.txt'
+    $hosts  = @($PublicHost, 'localhost') | Where-Object { $_ } | Select-Object -Unique
+    $X509   = [System.Security.Cryptography.X509Certificates.X509Certificate2]
+
+    # A cert we made ourselves is remade when the host name changes. The marker holds the
+    # hosts and thumbprint, so a cert you drop in at the same path is never overwritten.
+    $c = $null
+    if (Test-Path -LiteralPath $cert) {
+        $c = if ($cert -match '\.(pfx|p12)$') { $X509::new($cert, $env:ONCALL_CERT_PASSWORD) }
+             else {
+                 if (-not (Test-Path -LiteralPath $key)) { throw "Certificate $cert has no key file at $key. Set ONCALL_KEY_FILE." }
+                 $X509::CreateFromPemFile($cert, $key)
+             }
+    }
+    $mark = if (Test-Path -LiteralPath $marker) { (Get-Content -LiteralPath $marker -Raw).Trim() } else { '' }
+    $selfMade = $c -and $mark -like "*|$($c.Thumbprint)"
+    $stale    = $selfMade -and $mark -ne "$($hosts -join ',')|$($c.Thumbprint)"
+    if ($c -and -not $stale) {
+        $kind = if ($selfMade) { 'self-signed' } else { 'provided' }
+    }
+    else {
+        if ($env:ONCALL_CERT_FILE) { throw "ONCALL_CERT_FILE is set to '$cert', which doesn't exist." }
+        if (-not (Test-Path -LiteralPath $tls)) { $null = New-Item -ItemType Directory -Path $tls -Force }
+        $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+        $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                   "CN=$($hosts[0])", $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                   [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $san = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        foreach ($h in $hosts) {
+            $ip = $null
+            if ([System.Net.IPAddress]::TryParse($h, [ref]$ip)) { $san.AddIpAddress($ip) } else { $san.AddDnsName($h) }
+        }
+        $san.AddIpAddress([System.Net.IPAddress]::Loopback)
+        $req.CertificateExtensions.Add($san.Build())
+        $eku = [System.Security.Cryptography.OidCollection]::new()
+        $null = $eku.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+        $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $false))
+        $c = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddYears(2))
+        Set-Content -LiteralPath $cert -Value $c.ExportCertificatePem() -Encoding ascii
+        Write-OnCallPrivateFile -Path $key -Bytes ([Text.Encoding]::ASCII.GetBytes($rsa.ExportPkcs8PrivateKeyPem()))
+        Set-Content -LiteralPath $marker -Value "$($hosts -join ',')|$($c.Thumbprint)" -Encoding ascii
+        $kind = 'self-signed (new)'
+    }
+    $pfx = $c.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12)
+    [pscustomobject]@{
+        Certificate = $X509::new($pfx, [string]$null, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+        Kind        = $kind
+        Path        = $cert
+    }
+}
+
+Export-ModuleMember -Function Get-OnCallSettingsView, Set-OnCallSettings, Get-OnCallTimeZoneList, Get-OnCallCertificate,
+    Get-OnCallTeamsView, Get-OnCallCredentialStatus, Update-OnCallCredential, Invoke-OnCallApi, Get-OnCallStatus, Get-OnCallEvents, ConvertFrom-ClientTime

@@ -24,6 +24,10 @@
       <a href="#history" data-tab="history">History</a>
       <a href="#settings" data-tab="settings">Settings</a>
     </nav>
+    <div class="who" id="who" hidden>
+      <span id="who-name"></span>
+      <button type="button" class="btn small" id="sign-out">Sign out</button>
+    </div>
     <label class="master" title="When off, nothing changes in Webex">
       <span>Automatic switching</span>
       <input type="checkbox" role="switch" id="global-switch">
@@ -92,7 +96,23 @@
     <!-- Settings -->
     <section id="view-settings" class="view" hidden>
       <div class="settings-panel">
-        <h2 class="section-title first">Checking Webex</h2>
+        <h2 class="section-title first">Webex organization</h2>
+        <form id="org-form" class="org-form" autocomplete="off">
+          <label>Org ID
+            <input name="orgId" spellcheck="false" placeholder="00000000-0000-0000-0000-000000000000">
+          </label>
+          <label>Contact Center region
+            <select name="configBaseUrl"></select>
+          </label>
+          <label>Time zone for the schedule
+            <select name="timeZone"></select>
+          </label>
+          <p class="form-error" id="org-error" hidden></p>
+          <div><button class="btn primary" type="submit">Save</button></div>
+        </form>
+        <p class="hint">The org ID is in Control Hub under Account. Handoffs and covers happen at wall-clock times in this time zone.</p>
+
+        <h2 class="section-title">Checking Webex</h2>
         <form id="check-form" class="inline-form check-form">
           <label>Check Webex every
             <select name="checkMinutes">
@@ -133,7 +153,32 @@
           <li>Under <em>Org Authorizations</em>, paste that secret into <em>Enter Client Secret</em> and click <em>Generate tokens</em>.</li>
           <li>Copy the refresh token. If you regenerated the secret, paste both here.</li>
         </ol>
-        <p class="hint">Saved values are encrypted to the Windows account running this app and never shown again.</p>
+        <p class="hint" id="cred-protection">Saved values are encrypted and never shown again.</p>
+
+        <div id="network-settings" hidden>
+          <h2 class="section-title">Who can sign in</h2>
+          <p class="hint">People sign in with their Webex account. They must be in the org above and on this list.</p>
+          <ul class="user-list" id="user-list"></ul>
+          <form id="user-form" class="inline-form user-form" autocomplete="off">
+            <label>Email <input type="email" name="email" required spellcheck="false" placeholder="name@example.com"></label>
+            <button class="btn" type="submit">Add</button>
+          </form>
+          <p class="form-error" id="user-error" hidden></p>
+
+          <h2 class="section-title">Sign-in Integration</h2>
+          <dl class="kv" id="login-status"></dl>
+          <form id="login-form" class="stack-form" autocomplete="off">
+            <label>Client ID <input name="clientId" spellcheck="false" placeholder="Leave blank to keep the saved one"></label>
+            <label>Client secret <input type="password" name="clientSecret" autocomplete="new-password" spellcheck="false" placeholder="Leave blank to keep the saved one"></label>
+            <p class="form-error" id="login-error" hidden></p>
+            <div><button class="btn" type="submit">Save</button></div>
+          </form>
+          <p class="hint">This is a Webex Integration (not the Service App) with the <code>spark:people_read</code> scope.
+            Its redirect URI must be exactly the one shown above.</p>
+        </div>
+
+        <h2 class="section-title">About this install</h2>
+        <dl class="kv" id="about"></dl>
       </div>
     </section>
   </main>

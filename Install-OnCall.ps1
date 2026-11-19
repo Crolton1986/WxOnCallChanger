@@ -1,30 +1,37 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-Sets up the On-Call Manager to keep running under your own Windows account. No admin rights needed.
+Keeps the On-Call Manager running under your own account. No admin rights needed.
 
 .DESCRIPTION
 1. Installs Pode into your profile (CurrentUser scope) if it isn't already available.
-2. Checks that the saved Webex keys belong to you.
-3. Registers a scheduled task, as you, that runs Start-OnCall.ps1 -Service.
+2. Checks that the saved Webex keys can be read by this account.
+3. Windows: registers a scheduled task, as you, that runs Start-OnCall.ps1 -Service.
+   Linux:   writes a systemd user service and enables it, plus "linger" so it runs while
+            you're signed out.
 
-A boot trigger needs admin, so the task uses a repeating trigger instead: it starts now and
-re-checks every 5 minutes. If the server is already running, Windows skips the repeat. After a
-reboot or a crash it comes back within 5 minutes.
+Windows details: a boot trigger needs admin, so the task uses a repeating trigger instead. It
+starts now and re-checks every 5 minutes; if the server is already running, Windows skips the
+repeat. By default the task runs whether or not you're signed in, so it asks for your Windows
+password once. If your account isn't allowed to do that, use -WhenLoggedOn.
 
-By default the task runs whether or not you're signed in, so it asks for your Windows password
-once. If your account isn't allowed to do that, use -WhenLoggedOn to run only while you're signed in.
+In a container you don't need this script: the image runs the server, and Docker's restart
+policy keeps it up.
 
 .EXAMPLE
-.\Install-OnCall.ps1
+./Install-OnCall.ps1
 .EXAMPLE
-.\Install-OnCall.ps1 -WhenLoggedOn
+./Install-OnCall.ps1 -Listen Network -PublicUrl https://oncall.example.com:8443
 .EXAMPLE
-.\Install-OnCall.ps1 -Remove
+./Install-OnCall.ps1 -WhenLoggedOn
+.EXAMPLE
+./Install-OnCall.ps1 -Remove
 #>
 [CmdletBinding(DefaultParameterSetName = 'Install')]
 param(
-    [Parameter(ParameterSetName = 'Install')][int]$Port = 8080,
+    [Parameter(ParameterSetName = 'Install')][ValidateSet('Local', 'Network')][string]$Listen = 'Local',
+    [Parameter(ParameterSetName = 'Install')][int]$Port,
+    [Parameter(ParameterSetName = 'Install')][string]$PublicUrl,
     [Parameter(ParameterSetName = 'Install')][switch]$WhenLoggedOn,
     [Parameter(ParameterSetName = 'Remove', Mandatory)][switch]$Remove,
     [string]$TaskName = 'On-Call Manager'
@@ -32,42 +39,100 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$me   = "$env:USERDOMAIN\$env:USERNAME"
+if (-not $IsWindows -and -not $IsLinux) { throw 'Install-OnCall.ps1 supports Windows and Linux. On other systems, run Start-OnCall.ps1 under your own service manager.' }
+if (-not $Port) { $Port = if ($Listen -eq 'Network') { 8443 } else { 8080 } }
+
+$unitName = 'oncall.service'
+$unitDir  = Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }) 'systemd' 'user'
+$unitFile = Join-Path $unitDir $unitName
 
 if ($Remove) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Host "Removed scheduled task '$TaskName'." -ForegroundColor Green
-    } else {
-        Write-Host "No scheduled task named '$TaskName'."
+    if ($IsWindows) {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            Write-Host "Removed scheduled task '$TaskName'." -ForegroundColor Green
+        } else {
+            Write-Host "No scheduled task named '$TaskName'."
+        }
+    }
+    else {
+        if (Test-Path -LiteralPath $unitFile) {
+            & systemctl --user disable --now $unitName 2>$null
+            Remove-Item -LiteralPath $unitFile
+            & systemctl --user daemon-reload
+            Write-Host "Removed $unitName. Linger is left as it was (loginctl disable-linger to turn it off)." -ForegroundColor Green
+        } else {
+            Write-Host "No $unitName in $unitDir."
+        }
     }
     return
 }
 
 # --- 1. Pode, in your profile ------------------------------------------------
-$inLib = Get-ChildItem (Join-Path $root 'lib\Pode') -Filter Pode.psd1 -Recurse -ErrorAction SilentlyContinue
+$inLib = Get-ChildItem (Join-Path $root 'lib' 'Pode') -Filter Pode.psd1 -Recurse -ErrorAction SilentlyContinue
 if (-not $inLib -and -not (Get-Module -ListAvailable -Name Pode)) {
     Write-Host 'Installing Pode for your account (CurrentUser scope)...' -ForegroundColor Cyan
     Install-Module -Name Pode -Scope CurrentUser -Repository PSGallery -Force
 }
 
-# --- 2. Webex keys must be readable by this account --------------------------
-$secrets = Join-Path $root 'data\secrets.clixml'
-if (-not (Test-Path $secrets)) {
-    throw 'No Webex keys saved yet. Run .\Test-Webex.ps1 -SetupCredential first.'
-}
-try {
-    $s = Import-Clixml $secrets
-    $null = ConvertFrom-SecureString $s.ClientSecret -AsPlainText
-}
+# --- 2. Saved keys must be readable by this account ------------------------
+Import-Module (Join-Path $root 'modules' 'Webex.psm1') -Force
+Initialize-WebexModule -DataPath $(if ($env:ONCALL_DATA) { $env:ONCALL_DATA } else { Join-Path $root 'data' })
+$me = Get-OnCallAccountName
+try { $null = Get-WebexTokenStatus }
 catch {
-    throw "The saved Webex keys were saved by a different Windows account. Run .\Test-Webex.ps1 -SetupCredential as $me."
+    if ($_.Exception.Message -like 'No Webex keys*') {
+        Write-Warning 'No Webex keys saved yet. Add them on the Settings page once the server is running.'
+    }
+    else { throw "The saved Webex keys can't be read as $me. $($_.Exception.Message)" }
 }
 
-# --- 3. Scheduled task, as you -----------------------------------------------
-$pwsh    = (Get-Process -Id $PID).Path
-$argLine = "-NoProfile -NonInteractive -File `"$root\Start-OnCall.ps1`" -Service -Port $Port"
+$startArgs = "-Listen $Listen -Port $Port"
+if ($PublicUrl) { $startArgs += " -PublicUrl $PublicUrl" }
+$openAt = if ($Listen -eq 'Network') { if ($PublicUrl) { $PublicUrl } else { "https://localhost:$Port" } } else { "http://localhost:$Port" }
+$pwsh = (Get-Process -Id $PID).Path
+
+# --- 3a. Linux: systemd user service ------------------------------------------
+if ($IsLinux) {
+    if (-not (Get-Command systemctl -ErrorAction SilentlyContinue)) {
+        throw 'systemctl not found. Run Start-OnCall.ps1 under your own service manager, or use the container image.'
+    }
+    $null = New-Item -ItemType Directory -Path $unitDir -Force
+    @"
+[Unit]
+Description=On-Call Manager (Webex Contact Center on-call switching)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$root
+ExecStart=$pwsh -NoProfile -NonInteractive -File "$root/Start-OnCall.ps1" $startArgs
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"@ | Set-Content -LiteralPath $unitFile -Encoding utf8
+
+    & systemctl --user daemon-reload
+    & systemctl --user enable --now $unitName
+    if ($LASTEXITCODE) { throw "systemctl couldn't start $unitName. Check: journalctl --user -u $unitName" }
+
+    & loginctl enable-linger $env:USER 2>$null
+    $lingerOn = (& loginctl show-user $env:USER --property=Linger 2>$null) -eq 'Linger=yes'
+    Write-Host "Installed $unitName as $me." -ForegroundColor Green
+    if (-not $lingerOn) {
+        Write-Warning "It runs only while you're signed in, because this system wouldn't turn on linger for you. An admin can run: sudo loginctl enable-linger $env:USER"
+    }
+    Write-Host "Open $openAt in a few seconds. Logs: journalctl --user -u $unitName"
+    if ($Listen -eq 'Network') { Write-Host 'The first-time setup code is in that log.' }
+    return
+}
+
+# --- 3b. Windows: scheduled task, as you -----------------------------------
+$argLine = "-NoProfile -NonInteractive -File `"$(Join-Path $root 'Start-OnCall.ps1')`" -Service $startArgs"
 $action  = New-ScheduledTaskAction -Execute $pwsh -Argument $argLine -WorkingDirectory $root
 $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -92,7 +157,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 
 try {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings @register `
-        -Description "Webex Contact Center on-call switching. Web UI at http://localhost:$Port" | Out-Null
+        -Description "Webex Contact Center on-call switching. Web UI at $openAt" | Out-Null
 }
 catch {
     if ($WhenLoggedOn) { throw }
@@ -104,4 +169,4 @@ catch {
 Start-ScheduledTask -TaskName $TaskName
 $mode = if ($WhenLoggedOn) { 'while you are signed in' } else { 'whether or not you are signed in' }
 Write-Host "Installed '$TaskName' as $me, running $mode." -ForegroundColor Green
-Write-Host "Open http://localhost:$Port in a few seconds. Logs: $root\logs"
+Write-Host "Open $openAt in a few seconds. Logs: $(Join-Path $root 'logs')"

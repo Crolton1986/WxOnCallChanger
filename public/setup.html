@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>On-Call Setup</title>
+  <link rel="stylesheet" href="/public/app.css">
+  <script src="/public/auth.js" defer></script>
+</head>
+<body>
+  <main class="auth-page">
+    <div class="auth-card">
+      <h1>Set up sign-in</h1>
+      <p class="hint">This runs once. Afterwards everyone signs in with Webex, and these settings live on the Settings page.</p>
+      <ol class="steps">
+        <li>In the Webex Developer Portal, create an <em>Integration</em> with the scope <code>spark:people_read</code>.</li>
+        <li>Set its redirect URI to <code id="redirect-uri">…</code></li>
+        <li>Copy its client ID and client secret into the form below.</li>
+      </ol>
+      <form id="setup-form" autocomplete="off">
+        <label>Setup code (printed in the app's console or log)
+          <input name="code" required spellcheck="false" autocapitalize="characters" autocomplete="one-time-code">
+        </label>
+        <label>Webex org ID
+          <input name="orgId" required spellcheck="false" placeholder="00000000-0000-0000-0000-000000000000">
+        </label>
+        <label>Integration client ID
+          <input name="clientId" required spellcheck="false">
+        </label>
+        <label>Integration client secret
+          <input type="password" name="clientSecret" required autocomplete="new-password" spellcheck="false">
+        </label>
+        <label>Your Webex email (you'll be the first person who can sign in)
+          <input type="email" name="email" required spellcheck="false">
+        </label>
+        <button class="btn primary" type="submit">Save and continue</button>
+      </form>
+      <p class="form-error" id="setup-error" hidden></p>
+    </div>
+  </main>
+</body>
+</html>

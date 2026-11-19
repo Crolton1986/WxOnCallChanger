@@ -12,6 +12,7 @@ async function api(method, path, body) {
     opt.body = JSON.stringify(body ?? {});
   }
   const res = await fetch(path, opt);
+  if (res.status === 401) { location.href = '/login'; throw new Error('Signed out'); }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
   if (!res.ok) throw new Error(data?.error || `Request failed (HTTP ${res.status})`);
@@ -718,6 +719,9 @@ const eventNames = {
   override_add: 'Cover added', override_update: 'Cover changed', override_remove: 'Cover deleted',
   rotation_set: 'Rotation changed', person_add: 'Person added', person_update: 'Person changed',
   person_remove: 'Person removed', switch: 'Switch changed', credentials_update: 'Webex keys updated',
+  settings_update: 'Settings changed', setting_change: 'Settings changed', user_add: 'Can sign in', user_remove: 'Can no longer sign in',
+  login: 'Signed in', login_denied: 'Sign-in refused', setup: 'Sign-in set up', setup_denied: 'Wrong setup code',
+  login_keys_update: 'Sign-in keys updated',
   team_add: 'Team added', team_update: 'Team changed', team_remove: 'Team removed',
   swap_add: 'Weeks swapped', swap_remove: 'Swap deleted',
 };
@@ -749,24 +753,123 @@ async function renderHistory() {
 }
 
 /* ---------- Settings ---------- */
+const regions = [
+  ['https://api.wxcc-us1.cisco.com', 'United States (us1)'],
+  ['https://api.wxcc-ca1.cisco.com', 'Canada (ca1)'],
+  ['https://api.wxcc-eu1.cisco.com', 'Europe, UK (eu1)'],
+  ['https://api.wxcc-eu2.cisco.com', 'Europe, Germany (eu2)'],
+  ['https://api.wxcc-anz1.cisco.com', 'Australia (anz1)'],
+  ['https://api.wxcc-jp1.cisco.com', 'Japan (jp1)'],
+  ['https://api.wxcc-sg1.cisco.com', 'Singapore (sg1)'],
+];
+let zoneList = null;
+
+function options(list, selected) {
+  return list.map(([v, label]) => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(label)}</option>`).join('');
+}
+
+function drawSettings(s) {
+  const f = $('#org-form');
+  f.orgId.value = s.orgId ?? '';
+  const regionList = regions.some(([v]) => v === s.configBaseUrl) ? regions : [...regions, [s.configBaseUrl, s.configBaseUrl]];
+  f.configBaseUrl.innerHTML = options(regionList, s.configBaseUrl);
+  const zones = [['', `This computer's zone (${s.hostTimeZone})`], ...(zoneList ?? []).map((z) => [z.id, z.name])];
+  if (s.timeZone && !zones.some(([v]) => v === s.timeZone)) zones.push([s.timeZone, s.timeZone]);
+  f.timeZone.innerHTML = options(zones, s.timeZone ?? '');
+  $('#check-form').checkMinutes.value = String(s.checkMinutes ?? 30);
+  $('#cred-protection').textContent = `Saved values are encrypted (${s.protection}) and never shown again.`;
+
+  const about = [
+    ['Version', s.version ?? 'Unknown'],
+    ['Listening', s.listen === 'Network' ? `${s.publicUrl} (network, Webex sign-in)` : 'This computer only (localhost)'],
+    ['Runs on', `${s.platform}${s.container ? ', in a container' : ''}, as ${s.runningAs}`],
+    ['Schedule time zone', s.timeZoneInUse],
+  ];
+  $('#about').innerHTML = about.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+
+  const net = s.listen === 'Network';
+  $('#network-settings').hidden = !net;
+  if (!net) return;
+  $('#user-list').innerHTML = (s.users ?? []).map((u) => `<li>
+      <span>${esc(u.email)}${u.email === s.me ? ' <span class="chip-note">(you)</span>' : ''}</span>
+      <span class="chip-note">${u.addedBy ? `added by ${esc(u.addedBy)}` : ''}</span>
+      ${u.email === s.me ? '' : `<button type="button" class="btn small danger" data-remove="${esc(u.email)}">Remove</button>`}
+    </li>`).join('');
+  const l = s.login ?? {};
+  const lrows = [
+    ['Status', l.error ? l.error : (l.saved ? 'Saved' : 'Not set up')],
+    ['Client ID', l.clientIdHint ?? 'None'],
+    ['Redirect URI', l.redirectUri],
+  ];
+  $('#login-status').innerHTML = lrows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+}
+
 async function renderSettings() {
-  const c = await api('GET', '/api/credentials');
+  if (!zoneList) zoneList = (await api('GET', '/api/timezones')).items.sort((a, b) => a.name.localeCompare(b.name));
+  const [c, s] = await Promise.all([api('GET', '/api/credentials'), api('GET', '/api/settings')]);
   const rows = c.saved ? [
     ['Status', 'Connected'],
     ['Last renewed', fmtWhen(c.lastRefresh)],
     ['Token good for', c.refreshDaysRemaining != null ? `${Math.floor(c.refreshDaysRemaining)} days, renewed daily` : 'Unknown'],
     ['Client ID', c.clientIdHint ?? 'Unknown'],
-    ['Keys belong to', c.account],
-    ['Version', c.version ?? 'Unknown'],
+    ['Keys saved by', c.account],
   ] : [
-    ['Status', 'No keys saved for this account yet. Paste all three below.'],
-    ['Running as', c.runningAs],
-    ['Version', c.version ?? 'Unknown'],
+    ['Status', c.error && !/^No Webex keys/.test(c.error) ? c.error : 'No keys saved yet. Paste all three below.'],
   ];
-  $('#check-form').checkMinutes.value = String(c.checkMinutes ?? 30);
   $('#cred-status').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
   if (!c.saved) $('#cred-form details').open = true;
+  drawSettings(s);
 }
+
+$('#org-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  const err = $('#org-error');
+  err.hidden = true;
+  try {
+    drawSettings(await api('POST', '/api/settings', { orgId: f.orgId.value, configBaseUrl: f.configBaseUrl.value, timeZone: f.timeZone.value }));
+    toast('Settings saved');
+  } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+});
+
+$('#user-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  const err = $('#user-error');
+  err.hidden = true;
+  try {
+    drawSettings(await api('POST', '/api/users', { email: f.email.value }));
+    toast(`${f.email.value} can sign in now`);
+    f.reset();
+  } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+});
+
+$('#user-list').addEventListener('click', async (e) => {
+  const email = e.target.closest('[data-remove]')?.dataset.remove;
+  if (!email || !confirm(`Remove ${email}? They're signed out right away.`)) return;
+  try {
+    drawSettings(await api('DELETE', `/api/users/${encodeURIComponent(email)}`));
+    toast(`${email} can no longer sign in`);
+  } catch (ex) { toast(ex.message, true); }
+});
+
+$('#login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  const err = $('#login-error');
+  err.hidden = true;
+  if (!f.clientId.value.trim() && !f.clientSecret.value.trim()) { err.textContent = 'Enter a new client ID or secret first.'; err.hidden = false; return; }
+  try {
+    drawSettings(await api('POST', '/api/login-integration', { clientId: f.clientId.value, clientSecret: f.clientSecret.value }));
+    f.reset();
+    toast('Sign-in keys saved. Sign out and back in to test them.');
+  } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+});
+
+$('#sign-out').addEventListener('click', async () => {
+  try { await api('POST', '/auth/logout'); } catch { /* signed out either way */ }
+  location.href = '/login';
+});
 
 $('#cred-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -792,6 +895,7 @@ $('#check-form').addEventListener('change', async (e) => {
   const sel = e.target;
   try {
     const r = await api('POST', '/api/settings', { checkMinutes: Number(sel.value) });
+    drawSettings(r);
     toast(`Webex is checked every ${r.checkMinutes} minutes`);
     if (state.status) state.status.checkMinutes = r.checkMinutes;
   } catch (err) { toast(err.message, true); }
@@ -800,6 +904,14 @@ $('#check-form').addEventListener('change', async (e) => {
 /* ---------- start ---------- */
 window.addEventListener('hashchange', route);
 (async () => {
+  try {
+    const me = await api('GET', '/api/me');
+    if (me.listen === 'Network' && me.email) {
+      $('#who-name').textContent = me.name || me.email;
+      $('#who-name').title = me.email;
+      $('#who').hidden = false;
+    }
+  } catch { /* the 401 handler already redirected */ }
   try { await loadStatus(); $('#global-switch').checked = !!state.status.globalEnabled; } catch (e) { toast(e.message, true); }
   route();
 })();

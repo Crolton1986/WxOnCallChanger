@@ -1,0 +1,10 @@
+.git
+.github
+data
+logs
+lib
+tests
+master.key
+*.clixml
+*.tmp
+CLAUDE.md

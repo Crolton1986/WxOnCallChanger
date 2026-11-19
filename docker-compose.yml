@@ -1,0 +1,32 @@
+# On-Call Manager with Docker Compose (Linux host, or Docker Desktop on Windows/macOS).
+#
+# 1. Make a master key once (it encrypts the Webex keys saved from the Settings page):
+#      openssl rand -base64 48 > master.key
+#    Keep a copy somewhere safe. Without it, the saved keys must be entered again.
+# 2. Set ONCALL_PUBLIC_URL to the address people will type in their browser.
+# 3. docker compose up -d, then docker compose logs to get the one-time setup code.
+services:
+  oncall:
+    build: .
+    image: oncall:latest
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      ONCALL_PUBLIC_URL: "https://oncall.example.com:8443"
+      # Your own certificate (PEM). Leave unset to use a self-signed one made on first start.
+      # ONCALL_CERT_FILE: /app/data/tls/cert.pem
+      # ONCALL_KEY_FILE: /app/data/tls/key.pem
+    volumes:
+      # A named volume gets the right owner automatically. To use a folder instead:
+      #   mkdir data && sudo chown 10001 data   then   - ./data:/app/data
+      - oncall-data:/app/data
+    secrets:
+      - oncall_master_key
+
+volumes:
+  oncall-data:
+
+secrets:
+  oncall_master_key:
+    file: ./master.key

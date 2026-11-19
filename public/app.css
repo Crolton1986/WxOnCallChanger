@@ -354,3 +354,28 @@ dialog h2 { margin: 0 0 4px; font: 600 20px/1.2 var(--display); }
 
 .check-form { margin: 10px 0 8px; }
 .check-form label { min-width: 280px; }
+
+/* ---- Settings: org, sign-in list ---------------------------------------- */
+.org-form, .stack-form { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; max-width: 520px; }
+.org-form input, .org-form select { width: 100%; }
+.user-list { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-ctl); background: var(--surface); }
+.user-list li { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.user-list li:first-child { border-top: 0; }
+.user-list li > span:first-child { flex: 1; min-width: 180px; overflow-wrap: anywhere; }
+.user-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.user-form label { flex: 1; min-width: 220px; }
+.who { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+.who + .master { margin-left: 0; }
+.topbar .who { margin-left: auto; }
+
+/* ---- Sign-in and setup pages ------------------------------------------- */
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+.auth-card { width: 100%; max-width: 460px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-panel); padding: 28px 26px; }
+.auth-card h1 { font: 600 24px/1.2 var(--display); margin: 0 0 8px; display: flex; align-items: center; gap: 10px; }
+.auth-card .brand-mark { width: 26px; height: 26px; fill: currentColor; }
+.auth-card form { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.auth-card input { width: 100%; }
+.auth-card .btn.primary { width: 100%; padding: 10px; font-size: 15px; text-align: center; text-decoration: none; display: block; }
+.auth-card code { overflow-wrap: anywhere; background: var(--bg); padding: 2px 5px; border-radius: 4px; font-size: 13px; }
+.auth-card .steps { font-size: 14px; }
+.auth-card .form-error { margin-top: 12px; }

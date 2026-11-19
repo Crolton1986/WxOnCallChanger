@@ -1,0 +1,75 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pode
+        shell: pwsh
+        run: |
+          Install-Module Pode -RequiredVersion 2.14.1 -Scope CurrentUser -Force -Repository PSGallery
+          $PSVersionTable.PSVersion.ToString()
+
+      - name: Start mock Webex
+        shell: pwsh
+        run: |
+          $p = @{ FilePath = 'python'; ArgumentList = 'tests/mock_webex.py' }
+          if ($IsWindows) { $p.WindowStyle = 'Hidden' }
+          Start-Process @p
+          for ($i = 0; $i -lt 20; $i++) {
+            try { $null = Invoke-RestMethod http://127.0.0.1:8765/mock/user; break } catch { Start-Sleep 1 }
+          }
+
+      - name: Smoke test (Local and Network modes)
+        shell: pwsh
+        run: ./tests/Smoke.ps1
+
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t oncall:ci .
+
+      - name: Refuses to start without a master key
+        run: |
+          if docker run --rm oncall:ci > out.txt 2>&1; then echo "::error::started without a master key"; exit 1; fi
+          grep -q "No master key found" out.txt
+
+      - name: Starts with a master key and offers setup
+        run: |
+          mkdir -p data && sudo chown 10001 data
+          openssl rand -base64 48 > master.key && chmod 644 master.key
+          docker run -d --name oncall -p 8443:8443 \
+            -e ONCALL_PUBLIC_URL=https://localhost:8443 \
+            -v "$PWD/data:/app/data" -v "$PWD/master.key:/run/secrets/oncall_master_key:ro" oncall:ci
+          for i in $(seq 1 60); do curl -sk -o /dev/null https://localhost:8443/login && break; sleep 1; done
+          docker logs oncall
+          test "$(curl -sk -o /dev/null -w '%{redirect_url}' https://localhost:8443/login)" = "https://localhost:8443/setup"
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/api/status)" = "401"
+          docker logs oncall 2>&1 | grep -q "First-time setup"
+          sudo test -f data/tls/cert.pem

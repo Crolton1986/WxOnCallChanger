@@ -1,65 +1,200 @@
 #Requires -Version 7.4
 # Webex.psm1
-# Webex Contact Center config-service client for the On-Call Manager.
-# Ported from OnCall_Manager.ps1, with Service App auth instead of user OAuth.
+# Webex Contact Center config-service client for the On-Call Manager, with Service App auth.
 #
-# PUT semantics (same as the original script): GET the full team object,
-# change ONLY dialedNumber, PUT the whole object back.
+# PUT semantics: GET the full team object, change ONLY dialedNumber, PUT the whole object back.
 # Uses System.Text.Json so every other field round-trips byte for byte
 # (ConvertFrom-Json in PS7 rewrites date strings, which we don't want to PUT back).
 #
-# Secrets live in data\secrets.clixml, encrypted with DPAPI. Only the Windows
-# account that ran Set-WebexCredential, on this machine, can read them.
+# Secrets live in data\ and are encrypted one of two ways (see Get-OnCallKeyProtection):
+#   - a master key file (AES-256-GCM, data\<name>.json), used when one is configured and on Linux
+#   - Windows DPAPI (data\<name>.clixml), readable only by the Windows account that saved it
 
 $script:Config      = $null
-$script:SecretsFile = $null
+$script:ConfigFile  = $null
+$script:ConfigStamp = $null
+$script:DataDir     = $null
+$script:Protection  = $null
+
+$script:DefaultWebex = [ordered]@{
+    TokenUrl      = 'https://webexapis.com/v1/access_token'
+    AuthBaseUrl   = 'https://webexapis.com'
+    ConfigBaseUrl = 'https://api.wxcc-us1.cisco.com'
+    OrgId         = ''
+}
 
 # ---------------------------------------------------------------------------
-# Setup
+# Setup and config
 # ---------------------------------------------------------------------------
+
+function Get-OnCallAccountName {
+    <# The OS account this process runs as, for display and audit. #>
+    if ($IsWindows) { return "$([Environment]::UserDomainName)\$([Environment]::UserName)" }
+    [Environment]::UserName
+}
 
 function Initialize-WebexModule {
+    <# Points the module at a data folder. Creates the folder and a default config.json if missing. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DataPath)
 
-    $resolved   = (Resolve-Path -LiteralPath $DataPath).Path
-    $configFile = Join-Path $resolved 'config.json'
-    if (-not (Test-Path -LiteralPath $configFile)) {
-        throw "config.json not found in $resolved"
+    if (-not (Test-Path -LiteralPath $DataPath)) { $null = New-Item -ItemType Directory -Path $DataPath -Force }
+    $script:DataDir    = (Resolve-Path -LiteralPath $DataPath).Path
+    $script:ConfigFile = Join-Path $script:DataDir 'config.json'
+    if (-not (Test-Path -LiteralPath $script:ConfigFile)) {
+        $w = [ordered]@{}; foreach ($k in $script:DefaultWebex.Keys) { $w[$k] = $script:DefaultWebex[$k] }
+        Save-OnCallConfigFile ([ordered]@{ Webex = $w; TimeZone = '' })
     }
-    $script:Config      = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json -AsHashtable
-    $script:SecretsFile = Join-Path $resolved 'secrets.clixml'
+    $script:Config = $null
+    $null = Get-OnCallConfig
 }
 
 function Assert-WebexInit {
-    if ($script:Config) { return }
+    if ($script:DataDir) { return }
     if ($env:ONCALL_DATA) { Initialize-WebexModule -DataPath $env:ONCALL_DATA; return }
     throw 'Run Initialize-WebexModule first.'
 }
 
+function Save-OnCallConfigFile {
+    param([Parameter(Mandatory)]$Config)
+    $tmp = "$($script:ConfigFile).tmp"
+    $Config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding utf8
+    Move-Item -LiteralPath $tmp -Destination $script:ConfigFile -Force
+}
+
 function Get-OnCallConfig {
+    <# config.json as a hashtable, with defaults filled in. Re-read whenever the file changes,
+       so a change saved from one web request is seen by the others and by the scheduler. #>
     Assert-WebexInit
+    $stamp = (Get-Item -LiteralPath $script:ConfigFile).LastWriteTimeUtc
+    if (-not $script:Config -or $stamp -ne $script:ConfigStamp) {
+        $c = Get-Content -LiteralPath $script:ConfigFile -Raw | ConvertFrom-Json -AsHashtable
+        if (-not $c) { $c = @{} }
+        if (-not $c.Webex) { $c.Webex = @{} }
+        foreach ($k in $script:DefaultWebex.Keys) {
+            if ([string]::IsNullOrWhiteSpace($c.Webex[$k]) -and $k -ne 'OrgId') { $c.Webex[$k] = $script:DefaultWebex[$k] }
+            if ($null -eq $c.Webex[$k]) { $c.Webex[$k] = '' }
+        }
+        if ($null -eq $c.TimeZone) { $c.TimeZone = '' }
+        $script:Config      = $c
+        $script:ConfigStamp = $stamp
+    }
     $script:Config
 }
 
+function Set-OnCallConfig {
+    <# Changes the org-level settings that live in config.json. Only the values passed change. #>
+    [CmdletBinding()]
+    param([string]$OrgId, [string]$ConfigBaseUrl, [string]$TimeZone)
+
+    $c = Get-OnCallConfig
+    if ($PSBoundParameters.ContainsKey('OrgId')) {
+        $g = [guid]::Empty
+        $v = "$OrgId".Trim()
+        if ($v -and -not [guid]::TryParse($v, [ref]$g)) { throw "'$v' is not an org ID. Use the UUID from Control Hub." }
+        $c.Webex.OrgId = if ($v) { $g.ToString() } else { '' }
+    }
+    if ($PSBoundParameters.ContainsKey('ConfigBaseUrl')) {
+        $u = "$ConfigBaseUrl".Trim().TrimEnd('/')
+        if ($u -notmatch '^https?://[^/\s]+$') { throw "'$u' is not a base URL like https://api.wxcc-us1.cisco.com" }
+        $c.Webex.ConfigBaseUrl = $u
+    }
+    if ($PSBoundParameters.ContainsKey('TimeZone')) {
+        $z = "$TimeZone".Trim()
+        if ($z) {
+            try { $z = [TimeZoneInfo]::FindSystemTimeZoneById($z).Id }
+            catch { throw "Unknown time zone '$z'." }
+        }
+        $c.TimeZone = $z
+    }
+    Save-OnCallConfigFile $c
+    $script:Config = $null
+    Get-OnCallConfig
+}
+
 # ---------------------------------------------------------------------------
-# Secret store (DPAPI via Export-Clixml)
+# Secret store
 # ---------------------------------------------------------------------------
+
+function Get-OnCallKeyProtection {
+    <#
+    Decides how secrets are encrypted at rest:
+      1. ONCALL_MASTER_KEY_FILE, or a Docker secret at /run/secrets/oncall_master_key -> AES-GCM
+      2. Windows -> DPAPI (only the account that saved the keys can read them)
+      3. Anything else -> AES-GCM with a key generated once in the user's config folder,
+         outside data\, so copying data\ alone doesn't give away the keys.
+    ONCALL_REQUIRE_MASTER_KEY=1 turns step 2 and 3 off (the container image sets it), so a
+    missing secret fails loudly instead of quietly using a key that vanishes with the container.
+    #>
+    if ($script:Protection) { return $script:Protection }
+
+    $file = $env:ONCALL_MASTER_KEY_FILE
+    $dockerSecret = '/run/secrets/oncall_master_key'
+    if ($file) {
+        if (-not (Test-Path -LiteralPath $file)) { throw "ONCALL_MASTER_KEY_FILE is set to '$file', which doesn't exist." }
+    }
+    elseif (Test-Path -LiteralPath $dockerSecret) { $file = $dockerSecret }
+    elseif ($env:ONCALL_REQUIRE_MASTER_KEY -eq '1') {
+        throw "No master key found. Mount one as the Docker secret 'oncall_master_key' or set ONCALL_MASTER_KEY_FILE."
+    }
+    elseif ($IsWindows) {
+        $script:Protection = @{ Method = 'Dpapi'; Description = "Windows DPAPI, readable only by $(Get-OnCallAccountName)" }
+        return $script:Protection
+    }
+    else {
+        $base = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }
+        $file = Join-Path (Join-Path $base 'oncall') 'master.key'
+        if (-not (Test-Path -LiteralPath $file)) { New-OnCallMasterKeyFile -Path $file }
+    }
+
+    $text = (Get-Content -LiteralPath $file -Raw).Trim()
+    if ($text.Length -lt 32) { throw "The master key in '$file' is too short. Use at least 32 random characters." }
+    $script:Protection = @{
+        Method      = 'AesGcm'
+        Key         = [System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text))
+        KeyFile     = $file
+        Description = "AES-256-GCM with the master key at $file"
+    }
+    $script:Protection
+}
+
+function New-OnCallMasterKeyFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) {
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        if (-not $IsWindows) { [IO.File]::SetUnixFileMode($dir, [IO.UnixFileMode]'UserRead, UserWrite, UserExecute') }
+    }
+    $key = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+    Write-OnCallPrivateFile -Path $Path -Bytes ([Text.Encoding]::ASCII.GetBytes($key))
+}
+
+function Write-OnCallPrivateFile {
+    <# Writes a file only its owner can read (on Linux/macOS mode 600 from the moment it exists). #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][byte[]]$Bytes)
+    $opt = [IO.FileStreamOptions]::new()
+    $opt.Mode   = [IO.FileMode]::Create
+    $opt.Access = [IO.FileAccess]::Write
+    if (-not $IsWindows) { $opt.UnixCreateMode = [IO.UnixFileMode]'UserRead, UserWrite' }
+    $fs = [IO.FileStream]::new($Path, $opt)
+    try { $fs.Write($Bytes, 0, $Bytes.Length) } finally { $fs.Dispose() }
+    if (-not $IsWindows) { [IO.File]::SetUnixFileMode($Path, [IO.UnixFileMode]'UserRead, UserWrite') }
+}
 
 function Use-WebexSecretLock {
     <#
-    Runs a script block while holding a named lock on the keys file, so the web page and the
-    5-minute check never read or write it at the same time. The lock is re-entrant on one thread.
+    Runs a script block while holding a named lock on the data folder's key files, so the web
+    page and the scheduler never read or write them at the same time. Re-entrant on one thread.
     #>
     param([Parameter(Mandatory)][scriptblock]$ScriptBlock)
     Assert-WebexInit
     $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(
-                [Text.Encoding]::UTF8.GetBytes($script:SecretsFile.ToLowerInvariant()))).Substring(0, 16)
+                [Text.Encoding]::UTF8.GetBytes($script:DataDir.ToLowerInvariant()))).Substring(0, 16)
     $m = [System.Threading.Mutex]::new($false, "Local\OnCallManager-$hash")
     $owned = $false
     try {
         try { $owned = $m.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
-        if (-not $owned) { throw 'Timed out waiting for the Webex keys file.' }
+        if (-not $owned) { throw 'Timed out waiting for the key files.' }
         & $ScriptBlock
     }
     finally {
@@ -68,31 +203,124 @@ function Use-WebexSecretLock {
     }
 }
 
-function Get-WebexSecretStore {
-    Assert-WebexInit
-    Use-WebexSecretLock {
-        if (-not (Test-Path -LiteralPath $script:SecretsFile)) {
-            throw 'No Webex credentials stored. Run Set-WebexCredential as the account that will run the service.'
-        }
-        Import-Clixml -LiteralPath $script:SecretsFile
+function ConvertTo-SecretJson {
+    <# Store hashtable -> JSON text. SecureStrings and DateTimes are tagged so they come back typed. #>
+    param([Parameter(Mandatory)][hashtable]$Store)
+    $o = [ordered]@{}
+    foreach ($k in $Store.Keys) {
+        $v = $Store[$k]
+        $o[$k] = if ($v -is [securestring]) { @{ '$s' = (ConvertFrom-SecureString $v -AsPlainText) } }
+                 elseif ($v -is [datetime]) { @{ '$t' = $v.ToUniversalTime().Ticks } }
+                 else { $v }
     }
+    $o | ConvertTo-Json -Compress -Depth 5
+}
+
+function ConvertFrom-SecretJson {
+    param([Parameter(Mandatory)][string]$Json)
+    $raw = $Json | ConvertFrom-Json -AsHashtable
+    $out = @{}
+    foreach ($k in $raw.Keys) {
+        $v = $raw[$k]
+        $out[$k] = if ($v -is [hashtable] -and $v.ContainsKey('$s')) { ConvertTo-SecureString $v['$s'] -AsPlainText -Force }
+                   elseif ($v -is [hashtable] -and $v.ContainsKey('$t')) { [datetime]::new([long]$v['$t'], 'Utc') }
+                   else { $v }
+    }
+    $out
+}
+
+function Read-OnCallSecretFile {
+    <# Returns the named store (hashtable) or $null when nothing is saved yet. #>
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-WebexInit
+    $prot  = Get-OnCallKeyProtection
+    $dpapi = Join-Path $script:DataDir "$Name.clixml"
+    $aes   = Join-Path $script:DataDir "$Name.json"
+    Use-WebexSecretLock {
+        if ($prot.Method -eq 'Dpapi') {
+            if (Test-Path -LiteralPath $dpapi) {
+                try {
+                    $s = Import-Clixml -LiteralPath $dpapi
+                    foreach ($v in $s.Values) { if ($v -is [securestring]) { $null = ConvertFrom-SecureString $v -AsPlainText } }
+                    return $s
+                }
+                catch { throw "The saved keys in $Name.clixml belong to a different Windows account. Enter them again on Settings, or run as the account that saved them." }
+            }
+            if (Test-Path -LiteralPath $aes) {
+                throw "The saved keys in $Name.json were encrypted with a master key. Set ONCALL_MASTER_KEY_FILE to that key file, or enter the keys again on Settings."
+            }
+            return $null
+        }
+
+        if (Test-Path -LiteralPath $aes) {
+            try {
+                $f     = Get-Content -LiteralPath $aes -Raw | ConvertFrom-Json
+                $nonce = [Convert]::FromBase64String($f.nonce)
+                $tag   = [Convert]::FromBase64String($f.tag)
+                $data  = [Convert]::FromBase64String($f.data)
+                $plain = [byte[]]::new($data.Length)
+                $gcm   = [System.Security.Cryptography.AesGcm]::new($prot.Key, 16)
+                try { $gcm.Decrypt($nonce, $data, $tag, $plain, [Text.Encoding]::UTF8.GetBytes("oncall:$Name")) }
+                finally { $gcm.Dispose() }
+                return ConvertFrom-SecretJson ([Text.Encoding]::UTF8.GetString($plain))
+            }
+            catch {
+                throw "The saved keys in $Name.json can't be decrypted with the master key at $($prot.KeyFile). It's the wrong key, or the file is damaged. Use the original key, or enter the keys again on Settings."
+            }
+        }
+        if (Test-Path -LiteralPath $dpapi) {
+            throw "The saved keys in $Name.clixml were protected with Windows DPAPI, which this setup doesn't use. Enter them again on Settings."
+        }
+        $null
+    }
+}
+
+function Write-OnCallSecretFile {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$Store)
+    Assert-WebexInit
+    $prot = Get-OnCallKeyProtection
+    Use-WebexSecretLock {
+        # Write a temp file and swap it in, so a crash mid-write never leaves a broken keys file.
+        if ($prot.Method -eq 'Dpapi') {
+            $path = Join-Path $script:DataDir "$Name.clixml"
+            $Store | Export-Clixml -LiteralPath "$path.tmp" -Force
+        }
+        else {
+            $path   = Join-Path $script:DataDir "$Name.json"
+            $plain  = [Text.Encoding]::UTF8.GetBytes((ConvertTo-SecretJson $Store))
+            $nonce  = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(12)
+            $cipher = [byte[]]::new($plain.Length)
+            $tag    = [byte[]]::new(16)
+            $gcm    = [System.Security.Cryptography.AesGcm]::new($prot.Key, 16)
+            try { $gcm.Encrypt($nonce, $plain, $cipher, $tag, [Text.Encoding]::UTF8.GetBytes("oncall:$Name")) }
+            finally { $gcm.Dispose() }
+            $doc = [ordered]@{
+                v = 1; alg = 'AES-256-GCM'
+                nonce = [Convert]::ToBase64String($nonce); tag = [Convert]::ToBase64String($tag)
+                data  = [Convert]::ToBase64String($cipher)
+            } | ConvertTo-Json -Compress
+            Write-OnCallPrivateFile -Path "$path.tmp" -Bytes ([Text.Encoding]::UTF8.GetBytes($doc))
+        }
+        Move-Item -LiteralPath "$path.tmp" -Destination $path -Force
+    }
+}
+
+function Get-WebexSecretStore {
+    $s = Read-OnCallSecretFile -Name 'secrets'
+    if (-not $s) { throw 'No Webex keys saved yet. Add them on the Settings page.' }
+    $s
 }
 
 function Save-WebexSecretStore {
     param([Parameter(Mandatory)][hashtable]$Store)
-    Use-WebexSecretLock {
-        # Write a temp file and swap it in, so a crash mid-write never leaves a broken keys file.
-        $tmp = "$($script:SecretsFile).tmp"
-        $Store | Export-Clixml -LiteralPath $tmp -Force
-        Move-Item -LiteralPath $tmp -Destination $script:SecretsFile -Force
-    }
+    Write-OnCallSecretFile -Name 'secrets' -Store $Store
 }
 
 function Set-WebexCredential {
     <#
     .SYNOPSIS
     Saves the Service App client ID, client secret and refresh token, encrypted to the
-    current Windows account, then proves them with a token refresh. If the test fails,
+    way set by Get-OnCallKeyProtection, then proves them with a token refresh. If the test fails,
     the previous keys are put back.
 
     With no parameters it prompts for all three. From the web UI, any value left out
@@ -157,7 +385,7 @@ Do not use the Org ID or the Service App ID.
             AccessExpiresUtc  = [datetime]::MinValue
             RefreshExpiresUtc = $null
             UpdatedUtc        = [datetime]::UtcNow
-            Account           = "$env:USERDOMAIN\$env:USERNAME"
+            Account           = Get-OnCallAccountName
         }
 
         try { $null = Get-WebexAccessToken -Force }
@@ -168,7 +396,7 @@ Do not use the Org ID or the Service App ID.
         }
     }
     if ($interactive) {
-        Write-Host "Credentials saved and verified for $env:USERDOMAIN\$env:USERNAME." -ForegroundColor Green
+        Write-Host "Credentials saved and verified for $(Get-OnCallAccountName)." -ForegroundColor Green
     }
     Get-WebexTokenStatus
 }
@@ -222,7 +450,7 @@ function Get-WebexAccessToken {
         }
 
         try {
-            $resp = Invoke-WebRequest -Uri $script:Config.Webex.TokenUrl -Method Post -Body $body `
+            $resp = Invoke-WebRequest -Uri (Get-OnCallConfig).Webex.TokenUrl -Method Post -Body $body `
                         -ContentType 'application/x-www-form-urlencoded' -SkipHttpErrorCheck -TimeoutSec 15
         }
         catch {
@@ -298,8 +526,8 @@ function Invoke-WebexConfig {
         [string]$Body
     )
 
-    Assert-WebexInit
-    $w   = $script:Config.Webex
+    $w = (Get-OnCallConfig).Webex
+    if (-not $w.OrgId) { throw 'Set the Webex org ID on the Settings page first.' }
     $uri = '{0}/cms/api/organization/{1}/team/{2}' -f $w.ConfigBaseUrl.TrimEnd('/'),
            [uri]::EscapeDataString($w.OrgId), [uri]::EscapeDataString($TeamId)
 
@@ -420,6 +648,8 @@ function Set-WebexTeamDialNumber {
     [pscustomobject]$result
 }
 
-Export-ModuleMember -Function Initialize-WebexModule, Get-OnCallConfig, Set-WebexCredential,
+Export-ModuleMember -Function Initialize-WebexModule, Get-OnCallConfig, Set-OnCallConfig, Set-WebexCredential,
+    Get-OnCallAccountName, Get-OnCallKeyProtection, Read-OnCallSecretFile, Write-OnCallSecretFile,
+    Write-OnCallPrivateFile, Get-ResponseText,
     Get-WebexTokenStatus, Get-WebexAccessToken, ConvertTo-OnCallNumber,
     Get-WebexTeam, Set-WebexTeamDialNumber
