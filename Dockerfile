@@ -14,7 +14,10 @@ RUN apt-get update \
  && useradd --create-home --uid 10001 oncall
 
 WORKDIR /app
-COPY . /app
+# Only what the app runs. Never `COPY .`: data/, keys and tests stay out of the image.
+COPY Start-OnCall.ps1 Install-OnCall.ps1 Test-Webex.ps1 Test-Schedule.ps1 VERSION config.example.json /app/
+COPY modules/ /app/modules/
+COPY public/ /app/public/
 RUN mkdir -p /app/data /app/logs && chown oncall:oncall /app/data /app/logs
 
 # ONCALL_REQUIRE_MASTER_KEY=1: refuse to start without the oncall_master_key secret, so keys

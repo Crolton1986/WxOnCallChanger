@@ -84,7 +84,11 @@ function ConvertTo-OnCallOrgUuid {
         $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))
         $last = ($text -split '/')[-1]
         if ([guid]::TryParse($last, [ref]$g)) { return $g.ToString() }
-    } catch { }
+    }
+    catch {
+        # Not base64 or not an org URI: fall through and compare the raw value.
+        Write-Verbose "Org ID '$Value' isn't a Webex base64 ID: $($_.Exception.Message)"
+    }
     $Value.ToLowerInvariant()
 }
 

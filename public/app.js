@@ -57,7 +57,9 @@ const state = { status: null, people: [], rotations: [], calendar: null, hidden:
 const personName = (id) => state.people.find((p) => p.Id === id)?.Name ?? 'Unknown person';
 const teams = () => state.status?.teams ?? [];
 const teamOf = (key) => teams().find((t) => t.key === key);
-const tc = (key) => { const t = teamOf(key); return t ? `tc-${t.color}` : ''; };
+/* Team color class. Always a number 0-7, so it's safe inside innerHTML templates. */
+const colorClass = (c) => `tc-${(Number(c) || 0) & 7}`;
+const tc = (key) => { const t = teamOf(key); return t ? colorClass(t.color) : ''; };
 const onTeam = (p, key) => (p.Teams ?? []).includes(key);
 const peopleOn = (key) => state.people.filter((p) => onTeam(p, key));
 
@@ -124,7 +126,7 @@ function renderLines() {
         <dt>Then</dt><dd>${esc(t.nextPerson ?? 'No one scheduled')}</dd>
       </dl>`;
     return `
-      <article class="line tc-${t.color}">
+      <article class="line ${colorClass(t.color)}">
         <div class="line-head">
           <h2>${esc(t.displayName)}</h2>
           <label>Switching
@@ -207,7 +209,7 @@ async function renderCalendarView() {
 function renderFilters() {
   $('#team-filters').innerHTML = teams().map((t) => `
     <label><input type="checkbox" data-team="${esc(t.key)}" ${state.hidden.has(t.key) ? '' : 'checked'}>
-    <span class="dot tc-${t.color}"></span>${esc(t.displayName)}</label>`).join('');
+    <span class="dot ${colorClass(t.color)}"></span>${esc(t.displayName)}</label>`).join('');
 }
 $('#team-filters').addEventListener('change', (e) => {
   const k = e.target.dataset.team;
@@ -462,7 +464,7 @@ function drawRotations() {
       : `<p class="hint">${peopleOn(t.key).length ? 'Everyone on this team is in the rotation.' : 'No one is on this team yet. Add people to it on the People page.'}</p>`;
     const handoff = d.date ? `Handoff every ${weekday(d.date)} at ${timeFmt.format(new Date(`${d.date}T${d.time || '08:00'}`))}.` : 'Pick a handoff date.';
     return `
-      <div class="rot tc-${t.color}" data-team="${esc(t.key)}">
+      <div class="rot ${colorClass(t.color)}" data-team="${esc(t.key)}">
         <h3>${esc(t.displayName)}</h3>
         ${d.members.length ? `<ol>${list}</ol>` : '<p class="hint">No one in this rotation yet.</p>'}
         <div class="row">${addRow}</div>
@@ -524,7 +526,7 @@ $('#rotations').addEventListener('change', (e) => {
 async function renderPeople() {
   await Promise.all([loadPeople(), loadRotations(), loadStatus()]);
   $('#new-person-teams').innerHTML = '<legend>Teams</legend>' + (teams().length
-    ? teams().map((t) => `<label class="pick"><input type="checkbox" name="teams" value="${esc(t.key)}"><span class="dot tc-${t.color}"></span>${esc(t.displayName)}</label>`).join('')
+    ? teams().map((t) => `<label class="pick"><input type="checkbox" name="teams" value="${esc(t.key)}"><span class="dot ${colorClass(t.color)}"></span>${esc(t.displayName)}</label>`).join('')
     : '<span class="hint">Add a team on the Teams page first.</span>');
   drawPeople();
 }
@@ -657,7 +659,7 @@ function teamCard(t, editing = false) {
   const actions = editing
     ? `<button class="btn small primary" data-act="save">Save</button><button class="btn small" data-act="cancel">Cancel</button>`
     : `<button class="btn small" data-act="edit">Edit</button><button class="btn small danger" data-act="remove">Remove</button>`;
-  return `<article class="pcard tcard tc-${t.color}" data-key="${esc(t.key)}">${body}<div class="pcard-actions">${actions}</div></article>`;
+  return `<article class="pcard tcard ${colorClass(t.color)}" data-key="${esc(t.key)}">${body}<div class="pcard-actions">${actions}</div></article>`;
 }
 
 function drawTeams() {
@@ -796,8 +798,10 @@ function drawSettings(s) {
       ${u.email === s.me ? '' : `<button type="button" class="btn small danger" data-remove="${esc(u.email)}">Remove</button>`}
     </li>`).join('');
   const l = s.login ?? {};
+  let loginState = l.saved ? 'Saved' : 'Not set up';
+  if (l.error) loginState = l.error;
   const lrows = [
-    ['Status', l.error ? l.error : (l.saved ? 'Saved' : 'Not set up')],
+    ['Status', loginState],
     ['Client ID', l.clientIdHint ?? 'None'],
     ['Redirect URI', l.redirectUri],
   ];
@@ -814,7 +818,7 @@ async function renderSettings() {
     ['Client ID', c.clientIdHint ?? 'Unknown'],
     ['Keys saved by', c.account],
   ] : [
-    ['Status', c.error && !/^No Webex keys/.test(c.error) ? c.error : 'No keys saved yet. Paste all three below.'],
+    ['Status', c.error && !c.error.startsWith('No Webex keys') ? c.error : 'No keys saved yet. Paste all three below.'],
   ];
   $('#cred-status').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
   if (!c.saved) $('#cred-form details').open = true;

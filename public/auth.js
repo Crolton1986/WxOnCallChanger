@@ -18,7 +18,7 @@ if (setupForm) {
     $('#redirect-uri').textContent = s.redirectUri;
     if (s.orgId) setupForm.orgId.value = s.orgId;
     if (s.locked) show('Too many wrong codes. Restart the app to get a new code.');
-  });
+  }).catch((ex) => show(`Couldn't load setup: ${ex.message}`));
   setupForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     err.hidden = true;
