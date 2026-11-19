@@ -1,0 +1,9 @@
+{
+  "Webex": {
+    "OrgId": "00000000-0000-0000-0000-000000000000",
+    "ConfigBaseUrl": "https://api.wxcc-us1.cisco.com",
+    "TokenUrl": "https://webexapis.com/v1/access_token",
+    "AuthBaseUrl": "https://webexapis.com"
+  },
+  "TimeZone": ""
+}

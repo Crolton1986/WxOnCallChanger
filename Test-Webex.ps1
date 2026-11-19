@@ -7,10 +7,10 @@ Stage 1 test for the On-Call Manager Webex module.
 Default run is read-only: refreshes the Service App token, then reads each
 configured team's current dialedNumber.
 
-  .\Test-Webex.ps1 -SetupCredential   # first time: prompt for and store Service App creds
-  .\Test-Webex.ps1                    # read-only check of both teams
-  .\Test-Webex.ps1 -TeamKey support -SetNumber 15555551234 -WhatIf   # dry run of a change
-  .\Test-Webex.ps1 -TeamKey support -SetNumber 15555551234           # real change
+  ./Test-Webex.ps1 -SetupCredential   # first time: prompt for and store Service App creds
+  ./Test-Webex.ps1                    # read-only check of the configured teams
+  ./Test-Webex.ps1 -TeamKey support -SetNumber 15555551234 -WhatIf   # dry run of a change
+  ./Test-Webex.ps1 -TeamKey support -SetNumber 15555551234           # real change
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -20,10 +20,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'modules\Webex.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'modules\Schedule.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'modules' 'Webex.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'modules' 'Schedule.psm1') -Force
 Initialize-WebexModule -DataPath (Join-Path $PSScriptRoot 'data')
-Initialize-ScheduleModule -DataPath (Join-Path $PSScriptRoot 'data') -TimeZoneId (Get-OnCallConfig).TimeZone
+Initialize-ScheduleModule -DataPath (Join-Path $PSScriptRoot 'data')
 
 if ($SetupCredential) {
     Set-WebexCredential

@@ -1,3 +1,5 @@
 data/
 *.clixml
 *.tmp
+logs/
+master.key

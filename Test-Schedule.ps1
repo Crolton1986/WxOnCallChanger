@@ -3,11 +3,11 @@
 .SYNOPSIS
 Stage 2 test for the On-Call Manager schedule logic. Never writes to Webex.
 
-  .\Test-Schedule.ps1 -LoadSample   # builds a sample schedule
-  .\Test-Schedule.ps1               # who's on call now, the next 3 weeks, and the sync preview
+  ./Test-Schedule.ps1 -LoadSample   # builds a sample schedule (needs teams 'support' and 'systems')
+  ./Test-Schedule.ps1               # who's on call now, the next 3 weeks, and the sync preview
 
 The sample uses fake 555 numbers. Fix them with, for example:
-  Set-OnCallPerson -Person 'Emery Brooks' -Number 5555551234
+  Set-OnCallPerson -Person 'Alex Rivera' -Number 5555551234
 (after importing the modules the same way this script does)
 #>
 [CmdletBinding()]
@@ -15,10 +15,10 @@ param([switch]$LoadSample)
 
 $ErrorActionPreference = 'Stop'
 $data = Join-Path $PSScriptRoot 'data'
-Import-Module (Join-Path $PSScriptRoot 'modules\Webex.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'modules\Schedule.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'modules' 'Webex.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'modules' 'Schedule.psm1') -Force
 Initialize-WebexModule -DataPath $data
-Initialize-ScheduleModule -DataPath $data -TimeZoneId (Get-OnCallConfig).TimeZone
+Initialize-ScheduleModule -DataPath $data
 
 if ($LoadSample) {
     $file = Join-Path $data 'schedule.json'

@@ -3,7 +3,8 @@
 # Works out who should be on call for each team at a given time, and syncs Webex to match.
 #
 # Data lives in data\schedule.json (teams, people, rotations, covers, on/off switches).
-# All schedule times are Pacific wall-clock times, stored as "yyyy-MM-ddTHH:mm".
+# All schedule times are wall-clock times in the configured time zone (config.json TimeZone,
+# or the host's own zone when that is blank), stored as "yyyy-MM-ddTHH:mm".
 #
 # Every schedule source produces "slots": team, person, start, end, priority.
 # Today the sources are the weekly rotation (priority 10) and covers (priority 20).
@@ -13,6 +14,7 @@
 # ConvertTo-OnCallNumber). Import that first.
 
 $script:DataPath = $null
+$script:TzId     = $null   # explicit override from Initialize-ScheduleModule
 $script:Tz       = $null
 $script:WallFmt  = 'yyyy-MM-ddTHH:mm'
 $script:Actor    = $null   # who is making changes in this runspace; null = the Windows account
@@ -26,17 +28,30 @@ function Initialize-ScheduleModule {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DataPath,
-        [string]$TimeZoneId = 'Pacific Standard Time'
+        [string]$TimeZoneId   # blank = config.json TimeZone, then the host's zone
     )
-    if ([string]::IsNullOrWhiteSpace($TimeZoneId)) { $TimeZoneId = 'Pacific Standard Time' }
     $script:DataPath = (Resolve-Path -LiteralPath $DataPath).Path
-    $script:Tz       = [TimeZoneInfo]::FindSystemTimeZoneById($TimeZoneId)
+    $script:TzId     = $TimeZoneId
+    $script:Tz       = $null
+    $null = Get-ScheduleTimeZone
 }
 
 function Assert-ScheduleInit {
-    if ($script:DataPath -and $script:Tz) { return }
-    if ($env:ONCALL_DATA) { Initialize-ScheduleModule -DataPath $env:ONCALL_DATA -TimeZoneId $env:ONCALL_TZ; return }
+    if ($script:DataPath) { return }
+    if ($env:ONCALL_DATA) { Initialize-ScheduleModule -DataPath $env:ONCALL_DATA; return }
     throw 'Run Initialize-ScheduleModule first.'
+}
+
+function Get-ScheduleTimeZone {
+    <# The schedule's time zone. Follows config.json, so a change on Settings applies everywhere. #>
+    $id = $script:TzId
+    if ([string]::IsNullOrWhiteSpace($id)) { $id = (Get-OnCallConfig).TimeZone }
+    if ([string]::IsNullOrWhiteSpace($id)) { $id = [TimeZoneInfo]::Local.Id }
+    if (-not $script:Tz -or $script:Tz.Id -ne $id) {
+        try { $script:Tz = [TimeZoneInfo]::FindSystemTimeZoneById($id) }
+        catch { throw "Time zone '$id' isn't known on this system. On Linux, install tzdata and ICU." }
+    }
+    $script:Tz
 }
 
 function Get-SchedulePath { param([string]$Name) Assert-ScheduleInit; Join-Path $script:DataPath $Name }
@@ -45,7 +60,7 @@ function Get-ScheduleData {
     $file = Get-SchedulePath 'schedule.json'
     $d = if (Test-Path -LiteralPath $file) { Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable } else { @{} }
 
-    foreach ($k in 'People', 'Overrides') { $d[$k] = @($d[$k] | Where-Object { $_ }) }
+    foreach ($k in 'People', 'Overrides', 'Users') { $d[$k] = @($d[$k] | Where-Object { $_ }) }
     if (-not $d.Rotations) { $d.Rotations = @{} }
     if (-not $d.Switches)  { $d.Switches  = @{ Global = $false; Teams = @{} } }
     if (-not $d.Switches.Teams) { $d.Switches.Teams = @{} }
@@ -55,7 +70,7 @@ function Get-ScheduleData {
     # Teams used to live in config.json. Bring them over the first time.
     if ($null -eq $d.Teams) {
         $i = 0
-        $d.Teams = @(foreach ($t in @((Get-OnCallConfig).Teams)) {
+        $d.Teams = @(foreach ($t in @((Get-OnCallConfig).Teams | Where-Object { $_ })) {
             @{ Key = $t.Key; DisplayName = $t.DisplayName; WebexTeamId = $t.WebexTeamId; Color = ($i++ % $script:Colors) }
         })
     }
@@ -84,15 +99,15 @@ function Save-ScheduleData {
 }
 
 # ---------------------------------------------------------------------------
-# Time helpers (everything inside the module is Pacific wall-clock)
+# Time helpers (everything inside the module is wall-clock in the schedule's time zone)
 # ---------------------------------------------------------------------------
 
 function ConvertTo-ScheduleLocal {
-    <# Any DateTime -> Pacific wall-clock DateTime (Kind Unspecified). #>
+    <# Any DateTime -> wall-clock DateTime in the schedule's zone (Kind Unspecified). #>
     param([Parameter(Mandatory)][datetime]$Time)
     Assert-ScheduleInit
     if ($Time.Kind -eq 'Unspecified') { return $Time }   # already wall-clock
-    [TimeZoneInfo]::ConvertTime([DateTimeOffset]$Time, $script:Tz).DateTime
+    [TimeZoneInfo]::ConvertTime([DateTimeOffset]$Time, (Get-ScheduleTimeZone)).DateTime
 }
 
 function ConvertFrom-WallString {
@@ -433,7 +448,7 @@ function New-OverrideRecord {
         Note       = $Note
         SwapId     = $SwapId
         CreatedUtc = [datetime]::UtcNow.ToString('o')
-        CreatedBy  = if ($script:Actor) { $script:Actor } else { "$env:USERDOMAIN\$env:USERNAME" }
+        CreatedBy  = if ($script:Actor) { $script:Actor } else { Get-OnCallAccountName }
     }
 }
 
@@ -686,7 +701,7 @@ function Get-OverrideSlots {
 function Get-OnCallSlots {
     <#
     .SYNOPSIS
-    All schedule slots for a team that overlap From..To (Pacific wall-clock).
+    All schedule slots for a team that overlap From..To (wall-clock).
     This is what the calendar view will draw.
     #>
     [CmdletBinding()]
@@ -744,7 +759,7 @@ function Write-OnCallAudit {
         [string]$TeamKey, [string]$Old, [string]$New, [string]$Person, [string]$Source,
         [string]$Detail, [string]$Actor
     )
-    if (-not $Actor) { $Actor = if ($script:Actor) { $script:Actor } else { "$env:USERDOMAIN\$env:USERNAME" } }
+    if (-not $Actor) { $Actor = if ($script:Actor) { $script:Actor } else { Get-OnCallAccountName } }
     $line = [ordered]@{
         Ts = [datetime]::UtcNow.ToString('o'); Event = $Event; Actor = $Actor; TeamKey = $TeamKey
         Old = $Old; New = $New; Person = $Person; Source = $Source; Detail = $Detail
@@ -886,7 +901,59 @@ function Invoke-OnCallTick {
     Save-JsonAtomic -Path (Get-SchedulePath 'runtime.json') -Object $runtime
 }
 
-Export-ModuleMember -Function Invoke-OnCallTick, Get-OnCallCheckMinutes, Set-OnCallCheckMinutes,
+
+# ---------------------------------------------------------------------------
+# Who can sign in (network mode)
+# ---------------------------------------------------------------------------
+
+function ConvertTo-OnCallEmail {
+    param([Parameter(Mandatory)][string]$Email)
+    $e = $Email.Trim().ToLowerInvariant()
+    if ($e -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { throw "'$Email' is not an email address." }
+    $e
+}
+
+function Get-OnCallUser {
+    @((Get-ScheduleData).Users | ForEach-Object { [pscustomobject]$_ } | Sort-Object Email)
+}
+
+function Test-OnCallUserAllowed {
+    <# True when any of the given emails is on the sign-in list. #>
+    param([string[]]$Email)
+    $list = @((Get-ScheduleData).Users | ForEach-Object { $_.Email })
+    foreach ($e in $Email) { if ($e -and $list -contains $e.Trim().ToLowerInvariant()) { return $true } }
+    $false
+}
+
+function Add-OnCallUser {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Email)
+    $e = ConvertTo-OnCallEmail $Email
+    $data = Get-ScheduleData
+    if (@($data.Users | Where-Object { $_.Email -eq $e }).Count) { throw "$e can already sign in." }
+    $data.Users = @($data.Users) + @{ Email = $e; AddedUtc = [datetime]::UtcNow.ToString('o'); AddedBy = $script:Actor }
+    Save-ScheduleData $data
+    Write-OnCallAudit -Event 'user_add' -Detail $e
+    Get-OnCallUser
+}
+
+function Remove-OnCallUser {
+    <# Removes someone from the sign-in list. Never the person doing it, and never the last one. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Email, [string]$CurrentUser)
+    $e = ConvertTo-OnCallEmail $Email
+    $data = Get-ScheduleData
+    if (-not @($data.Users | Where-Object { $_.Email -eq $e }).Count) { throw "$e isn't on the list." }
+    if ($CurrentUser -and $e -eq $CurrentUser.Trim().ToLowerInvariant()) { throw "You can't remove yourself." }
+    if (@($data.Users).Count -le 1) { throw "Someone has to be able to sign in, so the last person can't be removed." }
+    $data.Users = @($data.Users | Where-Object { $_.Email -ne $e })
+    Save-ScheduleData $data
+    Write-OnCallAudit -Event 'user_remove' -Detail $e
+    Get-OnCallUser
+}
+
+Export-ModuleMember -Function Get-OnCallUser, Add-OnCallUser, Remove-OnCallUser, Test-OnCallUserAllowed,
+    Get-ScheduleTimeZone, Invoke-OnCallTick, Get-OnCallCheckMinutes, Set-OnCallCheckMinutes,
     Initialize-ScheduleModule, Get-ScheduleData, Save-ScheduleData,
     ConvertTo-ScheduleLocal,
     Get-OnCallTeams, Add-OnCallTeam, Set-OnCallTeam, Remove-OnCallTeam,
