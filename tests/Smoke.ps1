@@ -25,7 +25,7 @@ $work = Join-Path ([IO.Path]::GetTempPath()) "oncall-smoke-$([guid]::NewGuid().T
 $null = New-Item -ItemType Directory -Path $work
 if (-not $IsWindows) { $env:XDG_CONFIG_HOME = Join-Path $work 'xdg' }   # keep the generated master key out of ~/.config
 
-function Check { param([bool]$Ok, [string]$What) if (-not $Ok) { throw "FAIL: $What" }; Write-Host "  ok  $What" }
+function Show-Check { param([bool]$Ok, [string]$What) if (-not $Ok) { throw "FAIL: $What" }; Write-Host "  ok  $What" }
 
 function Invoke-Http {
     param([string]$Uri, [string]$Method = 'GET', $Body, [hashtable]$Headers = @{}, $Session, [switch]$NoGuardHeader)
@@ -81,74 +81,74 @@ try {
     Write-Host "Local mode ($(if ($IsWindows) { 'Windows' } else { 'Unix' }))" -ForegroundColor Cyan
     $local = Start-App -Listen Local -Port $LocalPort -Name 'local'
     $b = $local.Base
-    Check ((Invoke-Http "$b/api/status").StatusCode -eq 200) 'status without sign-in'
+    Show-Check ((Invoke-Http "$b/api/status").StatusCode -eq 200) 'status without sign-in'
     $me = Get-Json (Invoke-Http "$b/api/me")
-    Check ($me.listen -eq 'Local') 'reports Local mode'
+    Show-Check ($me.listen -eq 'Local') 'reports Local mode'
 
     $r = Invoke-Http "$b/api/credentials" -Method Post -Body @{ clientId = 'Cabc'; clientSecret = 'sec'; refreshToken = 'rt' }
-    Check ($r.StatusCode -eq 200 -and (Get-Json $r).saved) 'save and test Webex keys'
+    Show-Check ($r.StatusCode -eq 200 -and (Get-Json $r).saved) 'save and test Webex keys'
     $expect = if ($IsWindows) { 'secrets.clixml' } else { 'secrets.json' }
-    Check (Test-Path (Join-Path $local.Data $expect)) "keys stored as $expect"
+    Show-Check (Test-Path (Join-Path $local.Data $expect)) "keys stored as $expect"
     $r = Invoke-Http "$b/api/credentials" -Method Post -Body @{ refreshToken = 'expired' }
-    Check ($r.StatusCode -eq 400 -and (Get-Json $r).error -like '*previous keys were kept*') 'bad refresh token keeps old keys'
+    Show-Check ($r.StatusCode -eq 400 -and (Get-Json $r).error -like '*previous keys were kept*') 'bad refresh token keeps old keys'
 
     $team = Get-Json (Invoke-Http "$b/api/teams" -Method Post -Body @{ displayName = 'Support'; webexTeamId = 'aaaaaaaa-0000-4000-8000-000000000001' })
-    Check ($team.Key -eq 'support') 'add team'
+    Show-Check ($team.Key -eq 'support') 'add team'
     $person = Get-Json (Invoke-Http "$b/api/people" -Method Post -Body @{ name = 'Alex Rivera'; number = '555 555 1234'; teams = @('support') })
-    Check ($person.Number -eq '15555551234') 'add person'
+    Show-Check ($person.Number -eq '15555551234') 'add person'
     $null = Invoke-Http "$b/api/rotations/support" -Method Put -Body @{ members = @($person.Id); anchorStart = '2026-01-05T08:00'; anchorPersonId = $person.Id }
     $null = Invoke-Http "$b/api/switch" -Method Post -Body @{ enabled = $true }
     $null = Invoke-Http "$b/api/switch" -Method Post -Body @{ teamKey = 'support'; enabled = $true }
     $s = Get-Json (Invoke-Http "$b/api/sync" -Method Post -Body @{})
     $row = $s.teams | Where-Object { $_.key -eq 'support' }
-    Check ($row.current -eq '15555551234') 'sync switched the team in Webex'
-    Check ((Invoke-Http "$b/api/status" -Headers @{ Host = 'evil.example' }).StatusCode -eq 403) 'wrong Host refused'
-    Check ((Invoke-Http "$b/api/sync" -Method Post -Body @{} -NoGuardHeader).StatusCode -eq 403) 'write without X-OnCall refused'
+    Show-Check ($row.current -eq '15555551234') 'sync switched the team in Webex'
+    Show-Check ((Invoke-Http "$b/api/status" -Headers @{ Host = 'evil.example' }).StatusCode -eq 403) 'wrong Host refused'
+    Show-Check ((Invoke-Http "$b/api/sync" -Method Post -Body @{} -NoGuardHeader).StatusCode -eq 403) 'write without X-OnCall refused'
     $s = Get-Json (Invoke-Http "$b/api/settings" -Method Post -Body @{ timeZone = 'Europe/London' })
-    Check ($s.timeZoneInUse -match 'London|GMT') 'change time zone'
+    Show-Check ($s.timeZoneInUse -match 'London|GMT') 'change time zone'
     Stop-App $local; $local = $null
 
     # --- Network mode ------------------------------------------------------
     Write-Host 'Network mode' -ForegroundColor Cyan
     $net = Start-App -Listen Network -Port $NetworkPort -Name 'network'
     $b = $net.Base
-    Check ((Invoke-Http "$b/api/status").StatusCode -eq 401) 'API needs sign-in'
-    Check ("$((Invoke-Http "$b/").Headers.Location)" -like '*/login') 'page redirects to /login'
-    Check ("$((Invoke-Http "$b/login").Headers.Location)" -like '*/setup') 'login sends to setup first'
-    Check (Test-Path (Join-Path $net.Data 'tls' 'cert.pem')) 'self-signed cert created'
+    Show-Check ((Invoke-Http "$b/api/status").StatusCode -eq 401) 'API needs sign-in'
+    Show-Check ("$((Invoke-Http "$b/").Headers.Location)" -like '*/login') 'page redirects to /login'
+    Show-Check ("$((Invoke-Http "$b/login").Headers.Location)" -like '*/setup') 'login sends to setup first'
+    Show-Check (Test-Path (Join-Path $net.Data 'tls' 'cert.pem')) 'self-signed cert created'
 
     $code = (Select-String -Path $net.Log -Pattern '^\s+([A-Z2-9]{8})\s*$' | Select-Object -First 1).Matches[0].Groups[1].Value
-    Check ([bool]$code) 'setup code printed'
+    Show-Check ([bool]$code) 'setup code printed'
     $clientId = 'C' + ('a' * 64)
     $r = Invoke-Http "$b/api/setup" -Method Post -Body @{ code = 'WRONG123'; orgId = $org; clientId = $clientId; clientSecret = 's'; email = 'admin@example.com' }
-    Check ($r.StatusCode -eq 403) 'wrong setup code refused'
+    Show-Check ($r.StatusCode -eq 403) 'wrong setup code refused'
     $r = Invoke-Http "$b/api/setup" -Method Post -Body @{ code = $code; orgId = $org; clientId = $clientId; clientSecret = 's'; email = 'Admin@Example.com' }
-    Check ($r.StatusCode -eq 200) 'setup with the right code'
-    Check ((Invoke-Http "$b/setup").StatusCode -eq 404) 'setup closed afterwards'
+    Show-Check ($r.StatusCode -eq 200) 'setup with the right code'
+    Show-Check ((Invoke-Http "$b/setup").StatusCode -eq 404) 'setup closed afterwards'
 
     $ws = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    Check ((Invoke-WebexLogin -App $net -Session $ws -Email 'admin@example.com') -eq '/') 'listed user signs in'
+    Show-Check ((Invoke-WebexLogin -App $net -Session $ws -Email 'admin@example.com') -eq '/') 'listed user signs in'
     $me = Get-Json (Invoke-Http "$b/api/me" -Session $ws)
-    Check ($me.email -eq 'admin@example.com') 'session knows who signed in'
-    Check ((Invoke-Http "$b/api/status" -Session $ws).StatusCode -eq 200) 'API works when signed in'
+    Show-Check ($me.email -eq 'admin@example.com') 'session knows who signed in'
+    Show-Check ((Invoke-Http "$b/api/status" -Session $ws).StatusCode -eq 200) 'API works when signed in'
 
     $other = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    Check ((Invoke-WebexLogin -App $net -Session $other -Email 'bob@example.com') -like '/login?error=*list*') 'unlisted user refused'
-    Check ((Invoke-WebexLogin -App $net -Session $other -Email 'admin@example.com' -Org '99999999-2222-3333-4444-555555555555') -like '/login?error=*organization*') 'other org refused'
+    Show-Check ((Invoke-WebexLogin -App $net -Session $other -Email 'bob@example.com') -like '/login?error=*list*') 'unlisted user refused'
+    Show-Check ((Invoke-WebexLogin -App $net -Session $other -Email 'admin@example.com' -Org '99999999-2222-3333-4444-555555555555') -like '/login?error=*organization*') 'other org refused'
 
     $s = Get-Json (Invoke-Http "$b/api/users" -Method Post -Body @{ email = 'bob@example.com' } -Session $ws)
-    Check (@($s.users).Count -eq 2) 'add someone to the sign-in list'
-    Check ((Invoke-WebexLogin -App $net -Session $other -Email 'bob@example.com') -eq '/') 'newly listed user signs in'
+    Show-Check (@($s.users).Count -eq 2) 'add someone to the sign-in list'
+    Show-Check ((Invoke-WebexLogin -App $net -Session $other -Email 'bob@example.com') -eq '/') 'newly listed user signs in'
     $r = Invoke-Http "$b/api/users/admin%40example.com" -Method Delete -Session $ws
-    Check ($r.StatusCode -eq 400) "can't remove yourself"
+    Show-Check ($r.StatusCode -eq 400) "can't remove yourself"
     $null = Invoke-Http "$b/api/users/bob%40example.com" -Method Delete -Session $ws
-    Check ((Invoke-Http "$b/api/status" -Session $other).StatusCode -eq 401) 'removed user loses access right away'
+    Show-Check ((Invoke-Http "$b/api/status" -Session $other).StatusCode -eq 401) 'removed user loses access right away'
 
     $audit = Get-Content (Join-Path $net.Data 'audit.jsonl') | ConvertFrom-Json
-    Check (@($audit | Where-Object { $_.Event -eq 'user_add' -and $_.Actor -eq 'admin@example.com' }).Count -eq 1) 'audit shows who made the change'
+    Show-Check (@($audit | Where-Object { $_.Event -eq 'user_add' -and $_.Actor -eq 'admin@example.com' }).Count -eq 1) 'audit shows who made the change'
 
     $null = Invoke-Http "$b/auth/logout" -Method Post -Body @{} -Session $ws
-    Check ((Invoke-Http "$b/api/status" -Session $ws).StatusCode -eq 401) 'sign-out ends the session'
+    Show-Check ((Invoke-Http "$b/api/status" -Session $ws).StatusCode -eq 401) 'sign-out ends the session'
 
     Write-Host 'All smoke checks passed.' -ForegroundColor Green
 }
