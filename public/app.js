@@ -766,18 +766,30 @@ const regions = [
 ];
 let zoneList = null;
 
-function options(list, selected) {
-  return list.map(([v, label]) => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(label)}</option>`).join('');
+/* Settings builds its DOM with textContent, never HTML strings, so server text can't become markup. */
+function el(tag, { dataset, ...props } = {}, ...children) {
+  const n = Object.assign(document.createElement(tag), props);
+  Object.assign(n.dataset, dataset);
+  n.append(...children.filter((c) => c != null && c !== ''));
+  return n;
+}
+
+function fillOptions(select, list, selected) {
+  select.replaceChildren(...list.map(([v, label]) => new Option(label, v, false, v === selected)));
+}
+
+function fillKv(dl, rows) {
+  dl.replaceChildren(...rows.flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v ?? '' })]));
 }
 
 function drawSettings(s) {
   const f = $('#org-form');
   f.orgId.value = s.orgId ?? '';
   const regionList = regions.some(([v]) => v === s.configBaseUrl) ? regions : [...regions, [s.configBaseUrl, s.configBaseUrl]];
-  f.configBaseUrl.innerHTML = options(regionList, s.configBaseUrl);
+  fillOptions(f.configBaseUrl, regionList, s.configBaseUrl);
   const zones = [['', `This computer's zone (${s.hostTimeZone})`], ...(zoneList ?? []).map((z) => [z.id, z.name])];
   if (s.timeZone && !zones.some(([v]) => v === s.timeZone)) zones.push([s.timeZone, s.timeZone]);
-  f.timeZone.innerHTML = options(zones, s.timeZone ?? '');
+  fillOptions(f.timeZone, zones, s.timeZone ?? '');
   $('#check-form').checkMinutes.value = String(s.checkMinutes ?? 30);
   $('#cred-protection').textContent = `Saved values are encrypted (${s.protection}) and never shown again.`;
 
@@ -787,16 +799,18 @@ function drawSettings(s) {
     ['Runs on', `${s.platform}${s.container ? ', in a container' : ''}, as ${s.runningAs}`],
     ['Schedule time zone', s.timeZoneInUse],
   ];
-  $('#about').innerHTML = about.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  fillKv($('#about'), about);
 
   const net = s.listen === 'Network';
   $('#network-settings').hidden = !net;
   if (!net) return;
-  $('#user-list').innerHTML = (s.users ?? []).map((u) => `<li>
-      <span>${esc(u.email)}${u.email === s.me ? ' <span class="chip-note">(you)</span>' : ''}</span>
-      <span class="chip-note">${u.addedBy ? `added by ${esc(u.addedBy)}` : ''}</span>
-      ${u.email === s.me ? '' : `<button type="button" class="btn small danger" data-remove="${esc(u.email)}">Remove</button>`}
-    </li>`).join('');
+  $('#user-list').replaceChildren(...(s.users ?? []).map((u) => {
+    const you = u.email === s.me;
+    return el('li', {},
+      el('span', { textContent: u.email }, you ? el('span', { className: 'chip-note', textContent: ' (you)' }) : null),
+      el('span', { className: 'chip-note', textContent: u.addedBy ? `added by ${u.addedBy}` : '' }),
+      you ? null : el('button', { type: 'button', className: 'btn small danger', textContent: 'Remove', dataset: { remove: u.email } }));
+  }));
   const l = s.login ?? {};
   let loginState = l.saved ? 'Saved' : 'Not set up';
   if (l.error) loginState = l.error;
@@ -805,7 +819,7 @@ function drawSettings(s) {
     ['Client ID', l.clientIdHint ?? 'None'],
     ['Redirect URI', l.redirectUri],
   ];
-  $('#login-status').innerHTML = lrows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  fillKv($('#login-status'), lrows);
 }
 
 async function renderSettings() {
@@ -820,7 +834,7 @@ async function renderSettings() {
   ] : [
     ['Status', c.error && !c.error.startsWith('No Webex keys') ? c.error : 'No keys saved yet. Paste all three below.'],
   ];
-  $('#cred-status').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  fillKv($('#cred-status'), rows);
   if (!c.saved) $('#cred-form details').open = true;
   drawSettings(s);
 }
