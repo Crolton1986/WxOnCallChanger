@@ -5,7 +5,7 @@ features, major for changes that need `data\` or config edited by hand.
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-11-19
+## [0.10.0] - 2026-11-20
 
 ### Added
 - Runs on Linux as well as Windows, directly or in a container. `Dockerfile` and
